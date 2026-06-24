@@ -5,9 +5,19 @@ from typing import Any
 
 from agent.planner import infer_resource_type,build_plan
 from agent.detectors import run_detectors
-from agent.report import build_p3_report
+from agent.report import build_p4_report
 from approval.service import ApprovalService
-from app.schemas import DiagnosisFinding, DiagnosisRun, DiagnosisStep, EvidenceItem, ResourceIncident, RunStatus, utc_now
+from app.schemas import (
+    DiagnosisFinding,
+    DiagnosisRun,
+    DiagnosisStep,
+    EvidenceItem,
+    Recommendation,
+    ResourceIncident,
+    RiskLevel,
+    RunStatus,
+    utc_now,
+)
 from tools.registry import ToolExecutionResult, ToolRegistry, default_registry
 
 
@@ -47,7 +57,7 @@ class ResourceAgentResult:
 
 
 class ResourceAgent:
-    """ResourceOps V1-P3 主 Agent。
+    """ResourceOps V1-P4 主 Agent。
 
     当前流程：
     用户通过 CLI/API 输入问题
@@ -70,7 +80,9 @@ class ResourceAgent:
       ↓
     生成 EvidenceItem 和 DiagnosisFinding
       ↓
-    build_p3_report()
+    build_p4_report()
+      ↓
+    为危险建议创建 Approval
       ↓
     返回 ResourceAgentResult，交给 CLI/API 保存 trace 并输出报告
     """
@@ -143,23 +155,36 @@ class ResourceAgent:
 
         evidence_items, findings = run_detectors(run.run_id, tool_results)
         requires_approval = any(finding.requires_approval for finding in findings)
+        approvals = self._create_approvals(run.run_id, findings) if requires_approval else []
 
-        final_report = build_p3_report(
+        final_report = build_p4_report(
             description=incident.description,
             resource_type=resource_type,
             steps=steps,
             tool_results=tool_results,
             evidence_items=evidence_items,
             findings=findings,
+            approvals=approvals,
         )
-        run.status = RunStatus.COMPLETED
+        run.status = RunStatus.WAITING_APPROVAL if approvals else RunStatus.COMPLETED
         run.final_report = final_report
         run.root_cause = summarize_root_cause(findings)
         run.summary = (
             f"Executed {len(tool_results)} resource tools for {resource_type.value}; "
             f"detected {len(findings)} findings and {len(evidence_items)} evidence items."
+            f"and {len(approvals)} approvals."
         )
         run.ended_at = utc_now()
+
+        """
+        finding.requires_approval=True
+        ↓
+        _create_approvals()
+        ↓
+        有 approvals
+        ↓
+        run.status = waiting_approval
+        """
 
         return ResourceAgentResult(
             run=run,
@@ -168,15 +193,57 @@ class ResourceAgent:
             evidence_items=evidence_items,
             findings=findings,
             final_report=final_report,
-            requires_approval=requires_approval,
-            approvals=[],
+            requires_approval=bool(approvals),
+            approvals=approvals,
         )
 
     def _prepare_workspace(self, run_id: str) -> None:
         for dirname in ("raw", "compact"):
             (self.workspace_root / run_id / dirname).mkdir(parents=True, exist_ok=True)
 
+    def _create_approvals(
+        self,
+        run_id: str,
+        findings: list[DiagnosisFinding],
+    ) -> list[dict[str, Any]]:
+        if self.approval_service is None:
+            return []
+
+        approvals: list[dict[str, Any]] = []
+        for finding in findings:
+            for action in finding.recommended_actions:
+                if not action.requires_approval:
+                    continue
+
+                approval = self.approval_service.request_approval(
+                    run_id=run_id,
+                    action=action.action,
+                    args=approval_args_from_recommendation(action),
+                    reason=action.reason,
+                    risk=action.risk,
+                )
+                approvals.append(approval.model_dump(mode="json"))
+
+        return approvals
+
+
 def summarize_root_cause(findings: list[DiagnosisFinding]) -> str:
     if not findings:
         return "no detector findings matched current thresholds"
     return "; ".join(finding.finding_type for finding in findings[:3])
+
+def approval_args_from_recommendation(action: Recommendation) -> dict[str, Any]:
+    args: dict[str, Any] = {}
+
+    if action.action == "kill_process" and action.command_preview:
+        parts = action.command_preview.strip().split()
+        if len(parts) >= 2 and parts[0] == "kill":
+            try:
+                args["pid"] = int(parts[1])
+            except ValueError:
+                pass
+
+    if action.command_preview:
+        args["command_preview"] = action.command_preview
+
+    return args

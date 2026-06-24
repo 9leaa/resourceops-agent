@@ -2,7 +2,7 @@ from agent.resource_agent import ResourceAgent
 from app.schemas import ResourceIncident, ResourceType
 
 
-def test_p3_agent_executes_cpu_plan_and_runs_detectors() -> None:
+def test_p4_agent_executes_cpu_plan_and_runs_detectors() -> None:
     result = ResourceAgent().diagnose(ResourceIncident(description="为什么 CPU 很高？"))
 
     actions = [step.action for step in result.steps]
@@ -15,10 +15,11 @@ def test_p3_agent_executes_cpu_plan_and_runs_detectors() -> None:
     assert result.tool_results
     assert result.evidence_items is not None
     assert result.findings is not None
-    assert "V1-P3" in result.final_report
+    assert "审批" in result.final_report
+    assert "危险操作不会自动执行" in result.final_report
 
 
-def test_p3_agent_executes_mixed_plan_for_slow_training() -> None:
+def test_p4_agent_executes_mixed_plan_for_slow_training() -> None:
     result = ResourceAgent().diagnose(ResourceIncident(description="训练任务很慢"))
 
     actions = [step.action for step in result.steps]

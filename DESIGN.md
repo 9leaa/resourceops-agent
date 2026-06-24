@@ -8,13 +8,14 @@ The long-form design is currently maintained at:
 
 This project implements that design as a separate ResourceOps codebase.
 
-Current implementation stage: **V1-P3**.
+Current implementation stage: **V1-P4**.
 
-Implemented through V1-P3:
+Implemented through V1-P4:
 
 - V1-P0: project rename and schema adjustment.
 - V1-P1: real local GPU / CPU / Memory / Process tools.
 - V1-P2: deterministic ResourceAgent plans and ToolRegistry execution.
 - V1-P3: detectors that produce `EvidenceItem` and `DiagnosisFinding` records from tool results.
+- V1-P4: dangerous recommendations create Approval records and runs enter `waiting_approval`.
 
-Next stage: V1-P4 report and approval wiring for dangerous recommendations such as `kill_process`.
+Next stage: V1-P5 fixture eval, live smoke eval, and stress scripts.

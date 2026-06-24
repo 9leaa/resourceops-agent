@@ -2,7 +2,7 @@
 
 ResourceOps Agent is a local-first resource diagnosis agent for GPU, CPU, and Memory problems. It is based on the IncidentOps harness shape, but the product scope is real local resource diagnosis rather than simulated service incidents.
 
-Current status: **V1-P3**.
+Current status: **V1-P4**.
 
 ## What Works Now
 
@@ -22,12 +22,15 @@ Current status: **V1-P3**.
 - ResourceAgent executes planned tools through ToolRegistry.
 - Detectors convert tool results into `EvidenceItem` and `DiagnosisFinding` records.
 - Reports include resource checks, key evidence, findings, recommendations, and tool errors.
+- Dangerous recommendations create Approval records.
+- Runs with pending approvals enter `waiting_approval` status.
+- Approval records are persisted to `var/approvals.jsonl` and trace.
 - ToolRegistry with permission levels, validation, timeout, preview, and summary fields.
 - Approval store/service with simulated dangerous-action execution.
 - SQLite TraceStore for runs, steps, tool calls, evidence items, findings, and approvals.
 - Per-run workspace directories under `var/runs/<run_id>/`.
 
-P3 intentionally does not create Approval records yet. It only marks dangerous recommendations with `requires_approval=True`; approval creation starts in V1-P4.
+V1-P4 still does not execute real dangerous actions. Approval only simulates execution after a human approve command.
 
 ## Quick Start
 
@@ -36,7 +39,7 @@ cd /home/zcj/resourceops-agent
 python main.py diagnose "为什么 CPU 很高？"
 ```
 
-The command executes a deterministic resource plan, runs detectors, writes a trace to `var/resourceops.sqlite3`, and prints a V1-P3 diagnosis report.
+The command executes a deterministic resource plan, runs detectors, creates approvals for dangerous recommendations, writes a trace to `var/resourceops.sqlite3`, and prints a V1-P4 diagnosis report.
 
 Show recent runs:
 

@@ -8,12 +8,10 @@ from tools.registry import ToolExecutionResult
 
 
 class ApprovalService:
-    """Human decision service for dangerous ResourceOps actions.
+    """危险操作审批服务。
 
-    V1-P0 deliberately simulates execution after approval. Real process
-    termination is a later stage decision.
-    用于创建审批、查询待审批、批准、拒绝审批、校验审批状态
-    p0阶段，即使用户批准执行，也只是模拟执行
+    V1-P4 中，ResourceAgent 会为 dangerous recommendation 创建审批。
+    approve 后仍然只模拟执行，不会真实 kill 进程。
     """
 
     def __init__(self, store: ApprovalStore | None = None) -> None:

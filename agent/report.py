@@ -89,6 +89,8 @@ def build_p3_report(
         evidence_items: list[EvidenceItem],
         findings: list[DiagnosisFinding],
 ) -> str:
+    """V1-P3 阶段报告函数，保留用于阶段历史；当前 ResourceAgent 使用 build_p4_report。"""
+
     tool_lines = []
     for step in steps:
         if step.action == "infer_resource_type":
@@ -158,4 +160,92 @@ def build_p3_report(
 
 ### 7. 风险与审批
 V1-P3 只生成 requires_approval 标记，不创建审批单；审批创建将在 V1-P4 实现。
+""".strip()
+
+def build_p4_report(
+    description: str,
+    resource_type: ResourceType,
+    steps: list[DiagnosisStep],
+    tool_results: list[ToolExecutionResult],
+    evidence_items: list[EvidenceItem],
+    findings: list[DiagnosisFinding],
+    approvals: list[dict[str, Any]],
+) -> str:
+    tool_lines = []
+    for step in steps:
+        if step.action == "infer_resource_type":
+            continue
+        tool_lines.append(f"- {step.action}: {step.observation_preview or 'no preview'}")
+    if not tool_lines:
+        tool_lines.append("- no resource tools executed")
+
+    evidence_lines = [
+        f"- [{item.level}] {item.message}"
+        for item in evidence_items
+    ]
+    if not evidence_lines:
+        evidence_lines.append("- No detector evidence matched current thresholds.")
+
+    finding_lines = []
+    for finding in findings:
+        finding_lines.append(
+            f"- {finding.finding_type}: {finding.title} "
+            f"(confidence={finding.confidence}, requires_approval={finding.requires_approval})"
+        )
+    if not finding_lines:
+        finding_lines.append("- no findings")
+
+    recommendation_lines = []
+    for finding in findings:
+        for action in finding.recommended_actions:
+            recommendation_lines.append(
+                f"- {action.action}: {action.description} "
+                f"(risk={action.risk}, requires_approval={action.requires_approval})"
+            )
+    if not recommendation_lines:
+        recommendation_lines.append("- Continue monitoring or run a longer sampling diagnosis in a later stage.")
+
+    approval_lines = []
+    for approval in approvals:
+        approval_lines.append(
+            f"- approval_id={approval['approval_id']} action={approval['action']} "
+            f"status={approval['status']} reason={approval['reason']}"
+        )
+    if not approval_lines:
+        approval_lines.append("- none")
+
+    error_lines = [
+        f"- {result.tool_name}: {result.error}"
+        for result in tool_results
+        if result.error
+    ]
+    if not error_lines:
+        error_lines.append("- none")
+
+    return f"""## Resource Diagnosis Report
+
+### 1. 问题概览
+用户问题：{description}
+诊断类型：{resource_type.value}
+
+### 2. 资源检查
+{chr(10).join(tool_lines)}
+
+### 3. 关键证据
+{chr(10).join(evidence_lines)}
+
+### 4. 诊断发现
+{chr(10).join(finding_lines)}
+
+### 5. 建议操作
+{chr(10).join(recommendation_lines)}
+
+### 6. 审批
+{chr(10).join(approval_lines)}
+
+### 7. 工具错误
+{chr(10).join(error_lines)}
+
+### 8. 风险与审批
+危险操作不会自动执行。需要先运行 `python main.py approve <approval_id>` 才会模拟执行。
 """.strip()

@@ -1,6 +1,6 @@
 # Stage Pause Summary
 
-Current stage: **V1-P3**
+Current stage: **V1-P4**
 
 ## Implemented
 
@@ -10,6 +10,8 @@ Current stage: **V1-P3**
 - ResourceAgent executes planned tools through ToolRegistry.
 - Detectors convert tool results into `EvidenceItem` and `DiagnosisFinding` records.
 - Reports include resource checks, key evidence, findings, recommendations, and tool errors.
+- Dangerous recommendations create Approval records.
+- Runs with pending approvals enter `waiting_approval` status.
 - TraceStore persists runs, steps, tool calls, evidence items, findings, and approvals.
 - CLI and FastAPI diagnosis flow.
 
@@ -20,18 +22,17 @@ python -m compileall -q app agent approval trace tools scripts eval tests
 conda run -n zcj_hello python -m pytest -q
 ```
 
-Latest local result: `27 passed`.
+Latest local result: `31 passed`.
 
 ## Current Boundary
 
-V1-P3 only marks dangerous recommendations with `requires_approval=True`.
-It does not create approval records yet, and it does not execute dangerous actions.
+V1-P4 creates approval records for dangerous recommendations.
+It still does not execute real dangerous actions; approve only simulates execution.
 
 ## Next Stage
 
-V1-P4: report and approval wiring.
+V1-P5: eval and real stress/smoke scripts.
 
-- Create Approval records for dangerous recommendations such as `kill_process`.
-- Keep dangerous actions simulated after approval.
-- Update run status when waiting for approval.
-- Expand tests around approval creation, approve/reject, and trace persistence.
+- Add fixture eval cases.
+- Add live smoke eval.
+- Add bounded CPU / memory / GPU stress scripts.
