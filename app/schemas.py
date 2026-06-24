@@ -148,7 +148,7 @@ class DiagnosisRun(StrictBaseModel):
 
 
 class DiagnosisStep(StrictBaseModel):
-    """agent诊断过程中的一步
+    """agent诊断过程中的一步,用于格式化过程记录
     例如：1.识别问题类型，2.查询CPU状态，3.查询进程列表，4.生成结论"""
     step_id: str = Field(default_factory=lambda: new_id("step"))
     run_id: str
