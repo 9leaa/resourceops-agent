@@ -19,6 +19,18 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.schemas import StrictBaseModel, ToolCallStatus, ToolPermissionLevel
 
+from tools.cpu import GetCpuSnapshotInput, ListTopCpuProcessesInput,get_cpu_snapshot,list_top_cpu_processes
+from tools.gpu import GetGpuSnapshotInput, ListGpuProcessesInput, get_gpu_snapshot, list_gpu_processes
+from tools.memory import (
+    CheckOomEventsInput,
+    GetMemorySnapshotInput,
+    ListTopMemoryProcessesInput,
+    check_oom_events,
+    get_memory_snapshot,
+    list_top_memory_processes,
+)
+from tools.process import InspectProcessInput, inspect_process
+
 #每个工具handler都应该接受应该pydantic （basemodel）参数，然后返回任意结果
 ToolHandler = Callable[[BaseModel], Any]
 
@@ -209,4 +221,88 @@ def summary_data(data: Any) -> str:
 
 
 def default_registry(allow_dangerous: bool = False) -> ToolRegistry:
-    return ToolRegistry(allow_dangerous=allow_dangerous)
+    registry = ToolRegistry(allow_dangerous=allow_dangerous)
+
+    registry.register(
+        ToolSpec(
+            name="get_cpu_snapshot",
+            description="Collect current CPU load and utilization.",
+            input_model=GetCpuSnapshotInput,
+            handler=get_cpu_snapshot,
+            permission_level=ToolPermissionLevel.SAFE,
+            tags=["cpu","snapshot"],
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_top_cpu_processes",
+            description="List top CPU-consuming processes.",
+            input_model=ListTopCpuProcessesInput,
+            handler=list_top_cpu_processes,
+            permission_level=ToolPermissionLevel.SAFE,
+            tags=["cpu", "process"],
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="get_memory_snapshot",
+            description="Collect current memory and swap usage.",
+            input_model=GetMemorySnapshotInput,
+            handler=get_memory_snapshot,
+            permission_level=ToolPermissionLevel.SAFE,
+            tags=["memory", "snapshot"],
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_top_memory_processes",
+            description="List top memory-consuming processes.",
+            input_model=ListTopMemoryProcessesInput,
+            handler=list_top_memory_processes,
+            permission_level=ToolPermissionLevel.SAFE,
+            tags=["memory", "process"],
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="check_oom_events",
+            description="Check recent kernel OOM-related events.",
+            input_model=CheckOomEventsInput,
+            handler=check_oom_events,
+            permission_level=ToolPermissionLevel.SAFE,
+            timeout_seconds=6.0,
+            tags=["memory", "oom", "system"],
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="get_gpu_snapshot",
+            description="Collect current GPU utilization and memory usage via nvidia-smi.",
+            input_model=GetGpuSnapshotInput,
+            handler=get_gpu_snapshot,
+            permission_level=ToolPermissionLevel.SAFE,
+            tags=["gpu", "snapshot"],
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="list_gpu_processes",
+            description="List processes currently using GPU memory via nvidia-smi.",
+            input_model=ListGpuProcessesInput,
+            handler=list_gpu_processes,
+            permission_level=ToolPermissionLevel.SAFE,
+            tags=["gpu", "process"],
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="inspect_process",
+            description="Inspect one local process by PID.",
+            input_model=InspectProcessInput,
+            handler=inspect_process,
+            permission_level=ToolPermissionLevel.SAFE,
+            tags=["process"],
+        )
+    )
+
+    return registry
