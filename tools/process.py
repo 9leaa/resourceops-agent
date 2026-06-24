@@ -1,4 +1,4 @@
-"""Process inspection tools arrive in V1-P1."""
+"""Process inspection diagnostic tools."""
 
 from __future__ import annotations
 

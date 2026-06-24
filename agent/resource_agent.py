@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from agent.planner import infer_resource_type,build_plan
-from agent.report import build_p2_report
+from agent.detectors import run_detectors
+from agent.report import build_p3_report
 from approval.service import ApprovalService
 from app.schemas import DiagnosisFinding, DiagnosisRun, DiagnosisStep, EvidenceItem, ResourceIncident, RunStatus, utc_now
 from tools.registry import ToolExecutionResult, ToolRegistry, default_registry
@@ -46,53 +47,32 @@ class ResourceAgentResult:
 
 
 class ResourceAgent:
-    """用户通过 CLI/API 输入问题
-  ↓
-构造 ResourceIncident
-  ↓
-调用 ResourceAgent.diagnose(incident)
-  ↓
-infer_resource_type()
-  判断问题是 gpu / cpu / memory / mixed
-  ↓
-创建 DiagnosisRun
-  status = running
-  ↓
-创建 run workspace
-  var/runs/<run_id>/raw
-  var/runs/<run_id>/compact
-  ↓
-创建第 0 步 DiagnosisStep
-  action = infer_resource_type
-  ↓
-build_plan(resource_type)
-  根据类型生成固定工具计划
-  ↓
-循环执行 planned_actions
-  ↓
-ToolRegistry.execute(action, args)
-  统一校验参数、执行工具、处理错误、返回 ToolExecutionResult
-  ↓
-每个工具结果生成一个 DiagnosisStep
-  thought/action/args/observation/preview/latency/error
-  ↓
-收集 tool_results
-  ↓
-build_p2_report()
-  生成当前阶段报告
-  ↓
-run.status = completed
-  run.final_report = ...
-  run.root_cause = "detectors not implemented in V1-P2"
-  run.summary = ...
-  run.ended_at = ...
-  ↓
-返回 ResourceAgentResult
-  ↓
-CLI/API 调用方保存 trace
-  ↓
-CLI 打印报告 / API 返回 JSON
+    """ResourceOps V1-P3 主 Agent。
 
+    当前流程：
+    用户通过 CLI/API 输入问题
+      ↓
+    构造 ResourceIncident
+      ↓
+    ResourceAgent.diagnose(incident)
+      ↓
+    infer_resource_type()
+      ↓
+    创建 DiagnosisRun 和 run workspace
+      ↓
+    build_plan(resource_type)
+      ↓
+    ToolRegistry.execute(action, args)
+      ↓
+    生成 DiagnosisStep 和 ToolExecutionResult
+      ↓
+    run_detectors(tool_results)
+      ↓
+    生成 EvidenceItem 和 DiagnosisFinding
+      ↓
+    build_p3_report()
+      ↓
+    返回 ResourceAgentResult，交给 CLI/API 保存 trace 并输出报告
     """
 
 
@@ -126,7 +106,7 @@ CLI 打印报告 / API 返回 JSON
         #compact：压缩后的摘要、轻量trace
 
 
-        steps : list[DiagnosisFinding] = [
+        steps : list[DiagnosisStep] = [
             #第一步：先标准化用户请求，并推断资源类型
             DiagnosisStep(
                 run_id=run.run_id,
@@ -161,29 +141,42 @@ CLI 打印报告 / API 返回 JSON
                 )
             )
 
-        final_report = build_p2_report(
+        evidence_items, findings = run_detectors(run.run_id, tool_results)
+        requires_approval = any(finding.requires_approval for finding in findings)
+
+        final_report = build_p3_report(
             description=incident.description,
             resource_type=resource_type,
             steps=steps,
             tool_results=tool_results,
+            evidence_items=evidence_items,
+            findings=findings,
         )
         run.status = RunStatus.COMPLETED
         run.final_report = final_report
-        run.root_cause = "diagnosis not implemented in V1-P2"
-        run.summary = f"Executed {len(tool_results)} resource tools for {resource_type.value}; detectors start in V1-P3."
+        run.root_cause = summarize_root_cause(findings)
+        run.summary = (
+            f"Executed {len(tool_results)} resource tools for {resource_type.value}; "
+            f"detected {len(findings)} findings and {len(evidence_items)} evidence items."
+        )
         run.ended_at = utc_now()
 
         return ResourceAgentResult(
             run=run,
             steps=steps,
             tool_results=tool_results,
-            evidence_items=[],
-            findings=[],
+            evidence_items=evidence_items,
+            findings=findings,
             final_report=final_report,
-            requires_approval=False,
+            requires_approval=requires_approval,
             approvals=[],
         )
 
     def _prepare_workspace(self, run_id: str) -> None:
         for dirname in ("raw", "compact"):
             (self.workspace_root / run_id / dirname).mkdir(parents=True, exist_ok=True)
+
+def summarize_root_cause(findings: list[DiagnosisFinding]) -> str:
+    if not findings:
+        return "no detector findings matched current thresholds"
+    return "; ".join(finding.finding_type for finding in findings[:3])

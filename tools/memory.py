@@ -1,4 +1,4 @@
-"""Memory tools arrive in V1-P1."""
+"""Memory resource diagnostic tools."""
 
 from __future__ import annotations
 

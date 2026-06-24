@@ -67,11 +67,11 @@ class EmptyToolInput(BaseModel):
 
 
 class ToolRegistry:
-    """Execution boundary for all ResourceOps tools.
+    """ResourceOps 所有工具的统一执行边界。
 
-    P0 keeps the registry usable without real resource tools. P1 will register
-    GPU/CPU/Memory/Process collectors behind this same boundary.
-    注册、列出、查找、执行、拦截危险工具、处理参数校验、处理超时、处理重试、统一返回结果
+    V1-P3 中，ResourceAgent 通过这里执行真实资源采集工具，然后 detectors
+    再分析这些工具结果。这个类负责注册、列出、查找、执行、拦截危险工具、
+    参数校验、超时、重试和统一返回结果。
     """
 
     def __init__(self, allow_dangerous: bool = False, workspace_root: Path | str | None = None) -> None:

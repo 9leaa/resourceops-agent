@@ -143,7 +143,8 @@ class TraceStore:
         for step in result.steps:
             self.save_step(step)
         for index, tool_result in enumerate(result.tool_results):
-            step_id = result.steps[index].step_id if index < len(result.steps) else None
+            step_index = index + 1
+            step_id = result.steps[step_index].step_id if step_index < len(result.steps) else None
             self.save_tool_call(result.run.run_id, step_id, tool_result)
         for evidence in result.evidence_items:
             self.save_evidence(evidence)
