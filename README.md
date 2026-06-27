@@ -2,7 +2,7 @@
 
 ResourceOps Agent is a local-first resource diagnosis agent for GPU, CPU, and Memory problems. It is based on the IncidentOps harness shape, but the product scope is real local resource diagnosis rather than simulated service incidents.
 
-Current status: **V1-P6.5**.
+Current status: **V1-P7.5**.
 
 ## What Works Now
 
@@ -37,8 +37,10 @@ Current status: **V1-P6.5**.
 - SQLite TraceStore for runs, steps, tool calls, evidence items, findings, and approvals.
 - Per-run workspace directories under `var/runs/<run_id>/`.
 - Structured `ResourceAgentResult` shared by Agent, CLI, API, and TraceStore.
+- Optional `llm_report` mode that rewrites only the final report from existing evidence, findings, recommendations, and approvals.
+- Bounded report context builder gives LLM richer but controlled tool details such as top processes, GPU memory, memory/swap metrics, and OOM event previews.
 
-V1-P6.5 still does not execute real dangerous actions. Approval only simulates execution after a human approve command.
+V1-P7.5 still does not execute real dangerous actions. Approval only simulates execution after a human approve command.
 
 ## Quick Start
 
@@ -47,7 +49,23 @@ cd /home/zcj/resourceops-agent
 python main.py diagnose "为什么 CPU 很高？"
 ```
 
-The command executes a deterministic resource plan, runs detectors, creates approvals for dangerous recommendations, writes a trace to `var/resourceops.sqlite3`, and prints a V1-P6.5 diagnosis report.
+The command executes a deterministic resource plan, runs detectors, creates approvals for dangerous recommendations, writes a trace to `var/resourceops.sqlite3`, and prints a V1-P7.5 diagnosis report.
+
+Run with optional LLM report rewriting:
+
+```bash
+python main.py diagnose "为什么 CPU 很高？" --agent-mode llm_report
+```
+
+LLM settings are read from `.env` or environment variables:
+
+```bash
+RESOURCEOPS_LLM_BASE_URL=http://127.0.0.1:3000/v1
+RESOURCEOPS_LLM_API_KEY=replace-with-your-key
+RESOURCEOPS_LLM_MODEL=replace-with-your-model
+```
+
+In `llm_report` mode, trace includes `build_report_context` and `llm_report` steps. The first records the compact context given to the LLM, and the second records whether LLM generation succeeded or fell back.
 
 Show recent runs:
 
@@ -145,11 +163,10 @@ resourceops-agent/
 
 ## 后续路线
 
-当前已完成到 **V1-P6.5**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
+当前已完成到 **V1-P7.5**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
 
 ### V1 后续
 
-- V1-P7：LLM 报告生成器。LLM 只改写最终报告，不选择工具、不调用工具、不改 findings / approvals / run.status。
 - V1-P8：工具目录和计划 schema。把 ToolRegistry 暴露成可给 LLM 使用的工具目录，并定义 `ToolPlan` / `PlannedToolCall`。
 - V1-P9：LLM Planner + PlanValidator。LLM 可以提出工具调用计划，但必须经过系统校验；非法计划 fallback 到 deterministic plan。
 - V1-P10：TodoWrite / 任务面板。把 plan 转成可展示、可追踪、可恢复的任务列表。

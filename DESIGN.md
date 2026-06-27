@@ -8,9 +8,9 @@ The long-form design is currently maintained at:
 
 This project implements that design as a separate ResourceOps codebase.
 
-Current implementation stage: **V1-P6.5**.
+Current implementation stage: **V1-P7.5**.
 
-Implemented through V1-P6.5:
+Implemented through V1-P7.5:
 
 - V1-P0: project rename and schema adjustment.
 - V1-P1: real local GPU / CPU / Memory / Process tools.
@@ -20,12 +20,13 @@ Implemented through V1-P6.5:
 - V1-P5: fixture eval, live smoke eval, and bounded CPU / Memory / GPU stress scripts.
 - V1-P6: complete FastAPI demo flow, approval trace synchronization, and Docker Compose startup.
 - V1-P6.5: CLI approval trace synchronization, structured `ResourceAgentResult`, trace display polish, and report summary cleanup.
+- V1-P7: optional LLM report writer that rewrites only `final_report` from existing deterministic evidence and approvals.
+- V1-P7.5: bounded report context builder and trace step for the compact context given to the LLM.
 
-Next stage: **V1-P7 LLM 报告生成器**.
+Next stage: **V1-P8 工具目录和计划 schema**.
 
 V1 后续路线：
 
-- V1-P7：LLM 只改写报告，不参与工具选择和危险决策。
 - V1-P8：工具目录和计划 schema，为 LLM 工具规划做准备。
 - V1-P9：LLM Planner + PlanValidator，让 LLM 提出计划，系统负责校验、执行、审批和 trace。
 - V1-P10：TodoWrite / 任务面板，把计划变成可追踪任务。

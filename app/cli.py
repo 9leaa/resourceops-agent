@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--agent-mode",
         default="deterministic",
         choices=["deterministic", "llm_report"],
-        help="Agent mode. V1-P3 supports deterministic planning, tool execution, and detectors.",
+        help="Agent mode. deterministic uses template report; llm_report rewrites only the final report.",
     )
     diagnose_parser.add_argument("--json", action="store_true", help="Print structured JSON output.")
     diagnose_parser.add_argument(

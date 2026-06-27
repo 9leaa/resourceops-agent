@@ -1,6 +1,6 @@
 # Stage Pause Summary
 
-Current stage: **V1-P6.5**
+Current stage: **V1-P7.5**
 
 ## Implemented
 
@@ -24,6 +24,11 @@ Current stage: **V1-P6.5**
 - CLI trace output shows approval status in the normal text view.
 - `ResourceAgentResult` is a structured schema object shared by Agent, CLI, API, and TraceStore.
 - Diagnosis run summaries use a cleaner findings/evidence/approval count format.
+- Optional `llm_report` mode rewrites only `final_report` from existing deterministic evidence, findings, recommendations, and approvals.
+- LLM configuration is read from `.env` or environment variables, including local ccswitch/OpenAI-compatible base URLs.
+- LLM report failures fallback to the deterministic template report.
+- Trace records an `llm_report` step with LLM usage status, fallback reason, prompt/response lengths, and response preview.
+- `build_report_context` creates bounded, redacted tool context for LLM reports and records it as a trace step.
 
 ## Verified
 
@@ -32,18 +37,18 @@ python -m compileall -q app agent approval trace tools scripts eval tests
 conda run -n zcj_hello python -m pytest -q
 ```
 
-Latest local result before P6.5: `35 passed`; fixture eval passed at `4/4`.
+Latest local result: `49 passed`; fixture eval passed at `4/4`; live smoke passed.
 
 ## Current Boundary
 
-V1-P6.5 creates approval records for dangerous recommendations and supports complete HTTP and CLI approval trace synchronization.
+V1-P7.5 creates approval records for dangerous recommendations and supports complete HTTP and CLI approval trace synchronization.
 It still does not execute real dangerous actions; approve only simulates execution.
+LLM mode does not choose tools, call tools, create findings, or change approval/run status.
 
 ## Next Stages
 
-Next: **V1-P7 LLM 报告生成器**。
+Next: **V1-P8 工具目录和计划 schema**。
 
-- V1-P7：LLM 只根据已有 evidence / findings / approvals 改写 final_report，不选择工具、不调用工具、不改审批状态。
 - V1-P8：工具目录和计划 schema，把 ToolRegistry 暴露成可给 LLM 使用的工具目录，并定义 ToolPlan。
 - V1-P9：LLM Planner + PlanValidator，LLM 只提出计划，系统负责校验、执行、审批和 trace。
 - V1-P10：TodoWrite / 任务面板，把 plan 转成可展示、可追踪、可恢复的任务列表。

@@ -2256,7 +2256,7 @@ approval.status=executed
 
 ## V1 后续阶段
 
-### V1-P7：LLM 报告生成器
+### V1-P7：LLM 报告生成器（已实现）
 
 目标：
 
@@ -2299,6 +2299,43 @@ python -m pytest tests/test_llm_report.py tests/test_agent.py tests/test_api.py
 2. fake LLM 报错时，fallback 到确定性模板报告
 3. llm_report 不改变 findings / approvals / run.status
 4. pending approval 不会被 LLM 写成 executed
+```
+
+### V1-P7.5：Report Context Builder（已实现）
+
+目标：
+
+```text
+让 LLM 报告拿到更丰富但受控的上下文，避免只看到 tool preview / summary 而缺少关键明细。
+```
+
+实现功能：
+
+```text
+1. 新增 agent/report_context.py
+2. 按工具类型从 ToolExecutionResult.data 中提取关键字段
+3. 对进程 command 做截断
+4. 限制 top process / GPU process / OOM event 数量
+5. llm_report prompt 使用 report_context，而不是只使用 tool summary
+6. trace 增加 build_report_context step，记录 LLM 实际看到的 compact context
+```
+
+边界：
+
+```text
+1. 不把完整 raw tool data 直接交给 LLM
+2. 不让 LLM 重新决定 findings
+3. 不让 LLM 修改 approvals
+4. report_context 只用于报告生成，不用于工具执行决策
+```
+
+完成标准：
+
+```text
+1. LLM prompt 中能看到 top CPU / memory / GPU process 的关键字段
+2. trace 中能看到 build_report_context step
+3. build_report_context step 的 observation 保存 compact context
+4. llm_report step 继续记录 used_llm / fallback_reason / prompt_length / response_length
 ```
 
 ### V1-P8：工具目录和计划 schema
