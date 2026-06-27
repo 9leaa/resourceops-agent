@@ -6,9 +6,10 @@ from typing import Any
 from agent.detectors import run_detectors
 from agent.llm_client import LlmClient, build_default_llm_client_from_env
 from agent.llm_report import build_llm_report_result
-from agent.planner import infer_resource_type,build_plan
+from agent.planner import build_tool_plan, infer_resource_type, tool_plan_preview
 from agent.report_context import build_report_context, report_context_preview
 from agent.report import build_p4_report
+from agent.tool_catalog import build_tool_catalog
 from approval.service import ApprovalService
 from app.schemas import (
     DiagnosisFinding,
@@ -35,12 +36,14 @@ class ResourceAgent:
     ResourceAgent.diagnose(incident)
       ↓
     infer_resource_type()
-      ↓
+    ↓
     创建 DiagnosisRun 和 run workspace
       ↓
-    build_plan(resource_type)
+    build_tool_catalog(registry)
       ↓
-    ToolRegistry.execute(action, args)
+    build_tool_plan(resource_type, catalog)
+      ↓
+    ToolRegistry.execute(tool_name, args)
       ↓
     生成 DiagnosisStep 和 ToolExecutionResult
       ↓
@@ -102,19 +105,43 @@ class ResourceAgent:
             )
         ]
 
-        tool_results: list[ToolExecutionResult] = []
-        planned_actions = build_plan(resource_type)
+        tool_catalog = build_tool_catalog(self._catalog_registry())
+        tool_plan = build_tool_plan(
+            resource_type=resource_type,
+            user_question=incident.description,
+            tool_catalog=tool_catalog,
+        )
+        steps.append(
+            DiagnosisStep(
+                run_id=run.run_id,
+                step_index=len(steps),
+                thought="Build a structured tool plan from the available tool catalog.",
+                action="build_tool_plan",
+                args={
+                    "planner_mode": tool_plan.planner_mode,
+                    "resource_type": resource_type.value,
+                    "tool_catalog_version": tool_catalog.catalog_version,
+                },
+                observation={
+                    "tool_plan": tool_plan.model_dump(mode="json"),
+                    "tool_catalog": tool_catalog.model_dump(mode="json"),
+                },
+                observation_preview=tool_plan_preview(tool_plan),
+                latency_ms=0,
+            )
+        )
 
-        for planned in planned_actions:
-            result = self.registry.execute(planned.action, planned.args)
+        tool_results: list[ToolExecutionResult] = []
+        for planned in tool_plan.steps:
+            result = self.registry.execute(planned.tool_name, planned.args)
             tool_results.append(result)
 
             steps.append(
                 DiagnosisStep(
                     run_id=run.run_id,
                     step_index=len(steps),
-                    thought=planned.thought,
-                    action=planned.action,
+                    thought=planned.reason,
+                    action=planned.tool_name,
                     args=planned.args,
                     observation=result.model_dump(mode="json"),
                     observation_preview=result.preview,
@@ -213,6 +240,7 @@ class ResourceAgent:
 
         return ResourceAgentResult(
             run=run,
+            tool_plan=tool_plan,
             steps=steps,
             tool_results=tool_results,
             evidence_items=evidence_items,
@@ -225,6 +253,18 @@ class ResourceAgent:
     def _prepare_workspace(self, run_id: str) -> None:
         for dirname in ("raw", "compact"):
             (self.workspace_root / run_id / dirname).mkdir(parents=True, exist_ok=True)
+
+    def _catalog_registry(self) -> ToolRegistry:
+        """返回能导出工具目录的 registry。
+
+        测试里有些 fixture registry 只实现 execute()，不实现 list_tools()。
+        P8 的工具目录仍然使用默认工具说明，执行时继续使用传入的 fixture registry。
+        """
+
+        list_tools = getattr(self.registry, "list_tools", None)
+        if callable(list_tools):
+            return self.registry
+        return default_registry()
 
     def _create_approvals(
         self,

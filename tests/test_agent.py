@@ -10,6 +10,9 @@ def test_p4_agent_executes_cpu_plan_and_runs_detectors() -> None:
     assert isinstance(result, ResourceAgentResult)
     assert result.run.status == "completed"
     assert result.run.resource_type == ResourceType.CPU
+    assert result.tool_plan is not None
+    assert result.tool_plan.planner_mode == "deterministic"
+    assert "build_tool_plan" in actions
     assert "infer_resource_type" in actions
     assert "get_cpu_snapshot" in actions
     assert "list_top_cpu_processes" in actions

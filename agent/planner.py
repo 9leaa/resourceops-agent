@@ -2,13 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from app.schemas import ResourceType
+
+from app.schemas import (
+    PlannedToolCall,
+    PlannerMode,
+    ResourceType,
+    ToolCatalog,
+    ToolCatalogItem,
+    ToolPermissionLevel,
+    ToolPlan,
+)
 
 @dataclass(frozen=True)
 class PlannedAction:
     thought:str
     action:str
     args:dict[str, Any]
+
 
 def infer_resource_type(description: str, explicit: ResourceType | str | None = None) -> ResourceType:
     if explicit:
@@ -34,6 +44,86 @@ def infer_resource_type(description: str, explicit: ResourceType | str | None = 
     if any(keyword in text for keyword in mixed_keywords):
         return ResourceType.MIXED
     return ResourceType.MIXED
+
+
+def build_tool_plan(
+    resource_type: ResourceType,
+    user_question: str,
+    tool_catalog: ToolCatalog,
+    planner_mode: PlannerMode = PlannerMode.DETERMINISTIC,
+) -> ToolPlan:
+    """构建 P8 标准 ToolPlan。
+
+    当前仍然复用 deterministic plan 的固定工具顺序，但输出升级为结构化计划。
+    后续 LLM planner 也应该输出这个 ToolPlan，再交给同一套执行逻辑。
+    """
+
+    catalog_by_name = {tool.name: tool for tool in tool_catalog.tools}
+    planned_actions = build_plan(resource_type)
+    planned_calls: list[PlannedToolCall] = []
+
+    for index, action in enumerate(planned_actions):
+        catalog_item = catalog_by_name.get(action.action)
+        if catalog_item is None:
+            raise KeyError(f"planned tool is not in catalog: {action.action}")
+
+        planned_calls.append(
+            PlannedToolCall(
+                step_index=index,
+                tool_name=action.action,
+                args=action.args,
+                reason=action.thought,
+                expected_result=expected_result_for_tool(action.action),
+                permission_level=catalog_item.permission_level,
+                requires_approval=catalog_item.requires_approval,
+                required=True,
+                tags=catalog_item.tags,
+            )
+        )
+
+    return ToolPlan(
+        planner_mode=planner_mode,
+        resource_type=resource_type,
+        user_question=user_question,
+        steps=planned_calls,
+        max_steps=len(planned_calls),
+        budget={"max_tool_calls": len(planned_calls)},
+        fallback_plan=[],
+        tool_catalog_version=tool_catalog.catalog_version,
+    )
+
+
+def expected_result_for_tool(tool_name: str) -> str:
+    expectations = {
+        "get_cpu_snapshot": "CPU load、核心数、整体 CPU 使用率和单核归一化负载。",
+        "list_top_cpu_processes": "当前 CPU 占用最高的进程列表。",
+        "get_memory_snapshot": "系统内存、可用内存和 swap 使用情况。",
+        "list_top_memory_processes": "RSS 内存占用最高的进程列表。",
+        "check_oom_events": "近期内核 OOM 或 killed process 事件。",
+        "get_gpu_snapshot": "GPU 是否可用、GPU 利用率、显存、温度和功耗。",
+        "list_gpu_processes": "当前占用 GPU 显存的进程列表。",
+        "inspect_process": "指定 PID 的进程详情。",
+    }
+    return expectations.get(tool_name, "该工具返回的资源诊断信息。")
+
+
+def tool_plan_preview(plan: ToolPlan) -> str:
+    return (
+        f"tool_plan mode={plan.planner_mode} resource_type={plan.resource_type} "
+        f"steps={len(plan.steps)}"
+    )
+
+
+def catalog_item_for_name(tool_catalog: ToolCatalog, name: str) -> ToolCatalogItem | None:
+    for tool in tool_catalog.tools:
+        if tool.name == name:
+            return tool
+    return None
+
+
+def permission_for_planned_call(call: PlannedToolCall) -> ToolPermissionLevel:
+    return ToolPermissionLevel(call.permission_level)
+
 
 def build_plan(resource_type: ResourceType) -> list[PlannedAction]:
     if resource_type == ResourceType.GPU:

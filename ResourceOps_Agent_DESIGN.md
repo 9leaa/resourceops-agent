@@ -2346,32 +2346,62 @@ python -m pytest tests/test_llm_report.py tests/test_agent.py tests/test_api.py
 为 LLM 决定工具调用打基础，但还不让 LLM 真正接管规划。
 ```
 
+当前状态：
+
+```text
+已完成。
+P8 只标准化计划层，不改变工具执行、detectors、approval 和 report 的核心行为。
+```
+
 实现功能：
 
 ```text
-1. 增强 ToolSpec 元数据：name、description、input_schema、permission_level、tags、timeout、适用场景
-2. 新增 ToolCatalog：给 planner / LLM 暴露可用工具清单
+1. ToolRegistry.list_tools() 作为工具元信息来源
+2. 新增 ToolCatalog / ToolCatalogItem：给 planner / 未来 LLM planner 暴露可用工具清单
 3. 新增 PlannedToolCall / ToolPlan schema
-4. ToolPlan 支持 planner_mode、resource_type、steps、budget、fallback_plan
-5. 所有 plan 都能被序列化保存到 trace 或 run workspace
+4. ToolPlan 支持 planner_mode、resource_type、user_question、steps、budget、fallback_plan、tool_catalog_version
+5. ResourceAgent 按 ToolPlan.steps 执行工具
+6. trace 增加 build_tool_plan step，保存 tool_plan 和 tool_catalog 快照
+7. CLI trace 普通视图展示 planned tools
 ```
 
-建议 schema：
+实际 schema：
 
 ```text
 PlannedToolCall:
-  thought
-  action
+  planned_call_id
+  step_index
+  tool_name
   args
   reason
-  expected_observation
+  expected_result
+  permission_level
+  requires_approval
+  required
+  tags
 
 ToolPlan:
-  resource_type
+  plan_id
   planner_mode
+  resource_type
+  user_question
   steps
   max_steps
-  max_total_timeout_seconds
+  budget
+  fallback_plan
+  tool_catalog_version
+  created_at
+
+ToolCatalogItem:
+  name
+  description
+  input_schema
+  permission_level
+  requires_approval
+  timeout_seconds
+  retry
+  tags
+  resource_types
 ```
 
 完成标准：
@@ -2379,7 +2409,9 @@ ToolPlan:
 ```text
 1. 现有 deterministic plan 可以转换成 ToolPlan
 2. ToolRegistry.list_tools() 能生成给 LLM 使用的工具目录
-3. plan.json 可以保存到 var/runs/<run_id>/
+3. trace 中可以看到 build_tool_plan step
+4. tool_calls 能正确关联到真实工具 step，而不是计划 step
+5. P8 测试覆盖 ToolCatalog、ToolPlan 和 trace 关联
 ```
 
 ### V1-P9：LLM Planner 和 PlanValidator

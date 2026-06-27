@@ -3,6 +3,14 @@ from __future__ import annotations
 from app.schemas import ResourceType,DiagnosisStep,DiagnosisFinding,EvidenceItem
 from tools.registry import ToolExecutionResult
 
+
+NON_TOOL_ACTIONS = {
+    "infer_resource_type",
+    "build_tool_plan",
+    "build_report_context",
+    "llm_report",
+}
+
 def build_p0_report(description: str, resource_type: ResourceType) -> str:
     return f"""## Resource Diagnosis Report
 
@@ -40,7 +48,7 @@ def build_p2_report(
 
     tool_lines = []
     for step in steps:
-        if step.action == "infer_resource_type":
+        if step.action in NON_TOOL_ACTIONS:
             continue
         tool_lines.append(
             f"- {step.action}: {step.observation_preview or 'no preview'}"
@@ -93,7 +101,7 @@ def build_p3_report(
 
     tool_lines = []
     for step in steps:
-        if step.action == "infer_resource_type":
+        if step.action in NON_TOOL_ACTIONS:
             continue
         tool_lines.append(
             f"- {step.action}: {step.observation_preview or 'no preview'}"
@@ -173,7 +181,7 @@ def build_p4_report(
 ) -> str:
     tool_lines = []
     for step in steps:
-        if step.action == "infer_resource_type":
+        if step.action in NON_TOOL_ACTIONS:
             continue
         tool_lines.append(f"- {step.action}: {step.observation_preview or 'no preview'}")
     if not tool_lines:

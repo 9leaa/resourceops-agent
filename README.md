@@ -163,11 +163,17 @@ resourceops-agent/
 
 ## 后续路线
 
-当前已完成到 **V1-P7.5**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
+当前已完成到 **V1-P8**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
+
+V1-P8 已完成：
+
+- `ToolRegistry` 可以导出结构化 `ToolCatalog`，说明有哪些工具、参数 schema、权限等级、标签和适用资源类型。
+- deterministic planner 的固定计划已升级为 `ToolPlan` / `PlannedToolCall`。
+- `ResourceAgent` 现在按 `ToolPlan.steps` 执行工具，诊断行为与 P7.5 保持一致。
+- trace 普通视图和 JSON 视图都能看到本次使用的工具计划。
 
 ### V1 后续
 
-- V1-P8：工具目录和计划 schema。把 ToolRegistry 暴露成可给 LLM 使用的工具目录，并定义 `ToolPlan` / `PlannedToolCall`。
 - V1-P9：LLM Planner + PlanValidator。LLM 可以提出工具调用计划，但必须经过系统校验；非法计划 fallback 到 deterministic plan。
 - V1-P10：TodoWrite / 任务面板。把 plan 转成可展示、可追踪、可恢复的任务列表。
 - V1-P11：Workspace Isolation 增强。把 plan、todos、raw tool outputs、compact context、report 都保存到 `var/runs/<run_id>/`。

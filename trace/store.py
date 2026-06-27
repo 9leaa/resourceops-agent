@@ -142,9 +142,11 @@ class TraceStore:
         self.save_run(result.run)
         for step in result.steps:
             self.save_step(step)
-        for index, tool_result in enumerate(result.tool_results):
-            step_index = index + 1
-            step_id = result.steps[step_index].step_id if step_index < len(result.steps) else None
+        used_step_ids: set[str] = set()
+        for tool_result in result.tool_results:
+            step_id = self._match_tool_step_id(result.steps, tool_result.tool_name, used_step_ids)
+            if step_id is not None:
+                used_step_ids.add(step_id)
             self.save_tool_call(result.run.run_id, step_id, tool_result)
         for evidence in result.evidence_items:
             self.save_evidence(evidence)
@@ -152,6 +154,19 @@ class TraceStore:
             self.save_finding(finding)
         for approval_data in result.approvals:
             self.save_approval(Approval.model_validate(approval_data))
+
+    @staticmethod
+    def _match_tool_step_id(
+        steps: list[DiagnosisStep],
+        tool_name: str,
+        used_step_ids: set[str],
+    ) -> str | None:
+        for step in steps:
+            if step.step_id in used_step_ids:
+                continue
+            if step.action == tool_name:
+                return step.step_id
+        return None
 
     def save_run(self, run: DiagnosisRun) -> None:
         payload = run.model_dump(mode="json")

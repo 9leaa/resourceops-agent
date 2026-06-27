@@ -112,9 +112,30 @@ def handle_trace(args: argparse.Namespace) -> int:
         print(f"run_id={run['run_id']} status={run['status']} resource_type={run['resource_type']}")
         print(f"user_input={run['user_input']}")
         print(f"summary={run['summary']}")
+        plan_steps = []
+        for step in trace["steps"]:
+            if step["action"] != "build_tool_plan":
+                continue
+            observation = step.get("observation") or {}
+            tool_plan = observation.get("tool_plan") or {}
+            plan_steps = tool_plan.get("steps") or []
+            if tool_plan:
+                print(
+                    f"tool_plan={tool_plan.get('planner_mode')} "
+                    f"steps={len(plan_steps)} plan_id={tool_plan.get('plan_id')}"
+                )
+            break
         print("\nsteps:")
         for step in trace["steps"]:
             print(f"- #{step['step_index']} {step['action']} preview={step['observation_preview']}")
+        if plan_steps:
+            print("\nplanned tools:")
+            for planned in plan_steps:
+                print(
+                    f"- #{planned['step_index']} {planned['tool_name']} "
+                    f"risk={planned['permission_level']} approval={planned['requires_approval']} "
+                    f"args={planned['args']}"
+                )
         print("\nfindings:")
         if trace["findings"]:
             for finding in trace["findings"]:

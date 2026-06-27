@@ -5,6 +5,9 @@
 
 - ResourceIncident：用户输入的一次资源问题。
 - DiagnosisRun：Agent 对这个问题做的一次诊断运行。
+- ToolCatalog：当前系统可用工具的结构化目录。
+- ToolPlan：本次诊断准备执行的结构化工具计划。
+- PlannedToolCall：ToolPlan 中的一步工具调用计划。
 - DiagnosisStep：Agent 诊断过程中的一步。
 - ToolCall：一次工具调用的审计记录。
 - EvidenceItem：detector 从工具结果里提取出的一条证据。
@@ -116,6 +119,19 @@ class ToolCallStatus(str, Enum):
     SUCCESS = "success"
     ERROR = "error"
     BLOCKED_FOR_APPROVAL = "blocked_for_approval"
+
+
+class PlannerMode(str, Enum):
+    """工具计划由谁生成。
+
+    DETERMINISTIC：由当前固定规则 planner 生成。
+    LLM：未来由 LLM planner 生成。
+    FALLBACK：LLM planner 失败或计划不合法时使用的兜底计划。
+    """
+
+    DETERMINISTIC = "deterministic"
+    LLM = "llm"
+    FALLBACK = "fallback"
 
 
 class EvidenceCategory(str, Enum):
@@ -292,6 +308,117 @@ class ToolCall(StrictBaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ToolCatalogItem(StrictBaseModel):
+    """给 planner / LLM 使用的单个工具说明。
+
+    ToolRegistry 负责注册和执行工具，ToolCatalogItem 负责把工具能力表达清楚。
+    后续 LLM planner 只能根据这类结构化目录选择工具，不能凭空编工具名。
+
+    字段说明：
+    - name：工具名，必须能在 ToolRegistry 中找到。
+    - description：工具用途说明。
+    - input_schema：工具参数的 JSON Schema，来自工具输入模型。
+    - permission_level：工具权限等级。
+    - requires_approval：是否需要人工审批；dangerous 工具必须为 True。
+    - timeout_seconds：工具超时时间。
+    - retry：工具失败后的重试次数。
+    - tags：工具标签，例如 cpu/process/snapshot。
+    - resource_types：这个工具适合哪些资源类型的诊断。
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    permission_level: ToolPermissionLevel = ToolPermissionLevel.SAFE
+    requires_approval: bool = False
+    timeout_seconds: float = Field(default=5.0, gt=0.0)
+    retry: int = Field(default=0, ge=0)
+    tags: list[str] = Field(default_factory=list)
+    resource_types: list[ResourceType] = Field(default_factory=list)
+
+
+class ToolCatalog(StrictBaseModel):
+    """当前系统可用工具的结构化目录。
+
+    P8 先把 ToolRegistry 暴露成稳定目录，供 deterministic planner 使用。
+    P9/P10 后，LLM planner 也应该只看这个目录来生成 ToolPlan。
+
+    字段说明：
+    - catalog_version：目录格式版本。
+    - tools：所有可用工具说明。
+    - total_tools：工具数量，便于 trace 和测试快速检查。
+    - generated_at：目录生成时间。
+    """
+
+    catalog_version: str = "p8"
+    tools: list[ToolCatalogItem] = Field(default_factory=list)
+    total_tools: int = Field(default=0, ge=0)
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
+class PlannedToolCall(StrictBaseModel):
+    """ToolPlan 中的一步工具调用计划。
+
+    它不是工具执行结果，只是“准备调用哪个工具、带什么参数、为什么调用”。
+    真正执行后才会生成 ToolExecutionResult 和 ToolCall。
+
+    字段说明：
+    - planned_call_id：计划步骤 ID。
+    - step_index：计划内顺序，从 0 开始。
+    - tool_name：计划调用的工具名。
+    - args：计划传给工具的参数。
+    - reason：为什么需要这一步工具。
+    - expected_result：期望这一步拿到什么信息。
+    - permission_level：工具权限等级，来自 ToolCatalog。
+    - requires_approval：这一步是否需要人工审批。
+    - required：这一步是否是必要步骤；未来可用于跳过可选步骤。
+    - tags：工具标签快照，方便 trace 展示和后续筛选。
+    """
+
+    planned_call_id: str = Field(default_factory=lambda: new_id("pcall"))
+    step_index: int = Field(..., ge=0)
+    tool_name: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    reason: str
+    expected_result: str | None = None
+    permission_level: ToolPermissionLevel = ToolPermissionLevel.SAFE
+    requires_approval: bool = False
+    required: bool = True
+    tags: list[str] = Field(default_factory=list)
+
+
+class ToolPlan(StrictBaseModel):
+    """一次诊断运行的工具执行计划。
+
+    P8 的核心对象。它把“要执行哪些工具”从零散 list[PlannedAction] 升级为
+    可校验、可追踪、可复用的结构化计划。当前仍由 deterministic planner 生成；
+    未来 LLM planner 也必须输出同样的结构。
+
+    字段说明：
+    - plan_id：计划 ID。
+    - planner_mode：计划生成方式，例如 deterministic。
+    - resource_type：本计划面向的资源类型。
+    - user_question：用户原始问题，保存为计划上下文。
+    - steps：按顺序排列的工具调用计划。
+    - max_steps：本次计划最多允许执行多少步。
+    - budget：预算信息，例如 max_tool_calls，未来可加入 max_latency_ms。
+    - fallback_plan：备用工具计划，P8 先保留为空。
+    - tool_catalog_version：生成计划时使用的 ToolCatalog 版本。
+    - created_at：计划生成时间。
+    """
+
+    plan_id: str = Field(default_factory=lambda: new_id("plan"))
+    planner_mode: PlannerMode = PlannerMode.DETERMINISTIC
+    resource_type: ResourceType
+    user_question: str
+    steps: list[PlannedToolCall] = Field(default_factory=list)
+    max_steps: int = Field(default=0, ge=0)
+    budget: dict[str, Any] = Field(default_factory=dict)
+    fallback_plan: list[PlannedToolCall] = Field(default_factory=list)
+    tool_catalog_version: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class EvidenceItem(StrictBaseModel):
     """detector 从工具结果里提取出来的一条具体证据。
 
@@ -414,6 +541,7 @@ class ResourceAgentResult(StrictBaseModel):
 
     字段说明：
     - run：本次诊断运行的顶层状态。
+    - tool_plan：本次诊断使用的结构化工具计划。
     - steps：诊断步骤，包括资源类型推断和每个工具调用。
     - tool_results：工具层返回的标准化结果。
     - evidence_items：detector 生成的关键证据。
@@ -424,6 +552,7 @@ class ResourceAgentResult(StrictBaseModel):
     """
 
     run: DiagnosisRun
+    tool_plan: ToolPlan | None = None
     steps: list[DiagnosisStep] = Field(default_factory=list)
     tool_results: list[Any] = Field(default_factory=list)
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
