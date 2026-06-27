@@ -1,0 +1,50 @@
+{
+  "get_gpu_snapshot": {
+    "available": true,
+    "driver_version": "535.0",
+    "cuda_version": "12.2",
+    "gpus": [
+      {
+        "index": 0,
+        "name": "NVIDIA Test GPU",
+        "utilization_gpu_percent": 82,
+        "memory_used_mb": 23000,
+        "memory_total_mb": 24576,
+        "memory_used_percent": 93.59,
+        "temperature_c": 70,
+        "power_draw_w": 220
+      }
+    ]
+  },
+  "list_gpu_processes": {
+    "available": true,
+    "processes": [
+      {
+        "pid": 12345,
+        "gpu_uuid": "GPU-test",
+        "process_name": "python",
+        "used_memory_mb": 22000,
+        "username": "zcj",
+        "command": "python train.py"
+      }
+    ]
+  },
+  "get_cpu_snapshot": {
+    "cpu_count": 8,
+    "load_avg_1m": 3.0,
+    "overall_cpu_percent": 35
+  },
+  "get_memory_snapshot": {
+    "total_mb": 32000,
+    "available_mb": 12000,
+    "used_percent": 60,
+    "swap_total_mb": 8192,
+    "swap_used_percent": 0
+  },
+  "list_top_cpu_processes": {
+    "processes": []
+  },
+  "list_top_memory_processes": {
+    "processes": []
+  }
+}

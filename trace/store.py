@@ -6,11 +6,11 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.schemas import Approval, DiagnosisFinding, DiagnosisRun, DiagnosisStep, EvidenceItem, utc_now
+from app.schemas import Approval, DiagnosisFinding, DiagnosisRun, DiagnosisStep, EvidenceItem, RunStatus, utc_now
 from tools.registry import ToolExecutionResult
 
 if TYPE_CHECKING:
-    from agent.resource_agent import ResourceAgentResult
+    from app.schemas import ResourceAgentResult
 
 
 DEFAULT_TRACE_DB = Path(__file__).resolve().parents[1] / "var" / "resourceops.sqlite3"
@@ -310,6 +310,20 @@ class TraceStore:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def update_run_status(self, run_id: str, status: RunStatus, ended_at: str | None = None) -> None:
+        ended_at = ended_at or utc_now().isoformat()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE diagnosis_runs
+                SET status = ?, ended_at = ?
+                WHERE run_id = ?
+                """,
+                (status.value, ended_at, run_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"run not found: {run_id}")
 
     def get_trace(self, run_id: str) -> dict[str, Any]:
         with self.connect() as connection:

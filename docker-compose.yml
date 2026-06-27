@@ -1,0 +1,10 @@
+services:
+  resourceops-agent:
+    build: .
+    ports:
+      - "18000:18000"
+    environment:
+      RESOURCEOPS_TRACE_DB: /app/var/resourceops.sqlite3
+      RESOURCEOPS_APPROVAL_STORE: /app/var/approvals.jsonl
+    volumes:
+      - ./var:/app/var

@@ -7,6 +7,7 @@ from typing import Sequence
 from agent.resource_agent import ResourceAgent
 from approval.service import ApprovalService
 from approval.store import ApprovalStore
+from approval.trace_sync import sync_approval_trace
 from app.schemas import IncidentSource, ResourceIncident, ResourceType, Severity
 from trace.store import TraceStore
 
@@ -83,7 +84,7 @@ def handle_diagnose(args: argparse.Namespace) -> int:
     trace_store.save_agent_result(result)
 
     if args.json:
-        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
     else:
         print(result.final_report)
         print(f"\nrun_id={result.run.run_id}")
@@ -120,6 +121,15 @@ def handle_trace(args: argparse.Namespace) -> int:
                 print(f"- {finding['finding_type']} confidence={finding['confidence']}")
         else:
             print("- none")
+        print("\napprovals:")
+        if trace["approvals"]:
+            for approval in trace["approvals"]:
+                print(
+                    f"- {approval['approval_id']} {approval['action']} "
+                    f"status={approval['status']} risk={approval['risk']}"
+                )
+        else:
+            print("- none")
     return 0
 
 
@@ -136,7 +146,10 @@ def handle_approvals(args: argparse.Namespace) -> int:
 
 
 def handle_approve(args: argparse.Namespace) -> int:
-    approval, tool_result = ApprovalService().approve(args.approval_id)
+    trace_store = TraceStore()
+    approval_store = ApprovalStore()
+    approval, tool_result = ApprovalService(store=approval_store).approve(args.approval_id)
+    sync_approval_trace(trace_store, approval_store, approval)
     payload = {"approval": approval.model_dump(mode="json"), "tool_result": tool_result.model_dump(mode="json")}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -146,7 +159,10 @@ def handle_approve(args: argparse.Namespace) -> int:
 
 
 def handle_reject(args: argparse.Namespace) -> int:
-    approval = ApprovalService().reject(args.approval_id)
+    trace_store = TraceStore()
+    approval_store = ApprovalStore()
+    approval = ApprovalService(store=approval_store).reject(args.approval_id)
+    sync_approval_trace(trace_store, approval_store, approval)
     if args.json:
         print(json.dumps(approval.model_dump(mode="json"), ensure_ascii=False, indent=2))
     else:

@@ -1,5 +1,5 @@
 from agent.resource_agent import ResourceAgent
-from app.schemas import ResourceIncident, ResourceType
+from app.schemas import ResourceAgentResult, ResourceIncident, ResourceType
 
 
 def test_p4_agent_executes_cpu_plan_and_runs_detectors() -> None:
@@ -7,6 +7,7 @@ def test_p4_agent_executes_cpu_plan_and_runs_detectors() -> None:
 
     actions = [step.action for step in result.steps]
 
+    assert isinstance(result, ResourceAgentResult)
     assert result.run.status == "completed"
     assert result.run.resource_type == ResourceType.CPU
     assert "infer_resource_type" in actions

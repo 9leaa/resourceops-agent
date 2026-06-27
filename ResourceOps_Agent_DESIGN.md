@@ -583,6 +583,16 @@ LLM report writer 必须遵守：
 5. 必须保留 evidence 列表
 ```
 
+实现边界：
+
+```text
+1. planner / ToolRegistry / detectors / approval 仍然全部由 deterministic core 负责
+2. LLM 输入只能来自 tool summaries、evidence_items、findings、recommendations、approvals
+3. LLM 输出只允许替换 final_report
+4. LLM 不允许修改 run.status、findings、approvals、tool_results
+5. LLM 失败、超时、缺少 API key 或输出不合规时，必须 fallback 到模板报告
+```
+
 ---
 
 # 6. 核心模块设计
@@ -2061,22 +2071,27 @@ var/runs/run_xxx/
 
 # 17. 第一版开发阶段
 
-## V1-P0：项目重命名和 schema 调整
-
-目标：
+第一版的主线是：
 
 ```text
-从 IncidentOps 迁移到 ResourceOps。
+先做真实可用、可追踪、可评测的单 Agent 闭环，
+再逐步加入 LLM 报告、LLM 工具规划、计划校验和任务面板。
 ```
 
-任务：
+第一版不做多 Agent 自治，也不让 LLM 绕过系统边界。LLM 可以逐步参与，但所有工具执行、危险动作、trace 和 eval 都必须由系统接管。
+
+## V1 已完成阶段
+
+### V1-P0：项目重命名和 schema 调整
+
+实现内容：
 
 ```text
-1. 保留 ToolRegistry / TraceStore / Approval
-2. 新增 ResourceIncident
-3. 新增 EvidenceItem / DiagnosisFinding
-4. CLI 从 incident 改成 diagnose
-5. README 更新目标
+1. 从 IncidentOps 收敛到 ResourceOps
+2. 保留 ToolRegistry / TraceStore / Approval 等 Agent Harness 底座
+3. 新增 ResourceIncident、EvidenceItem、DiagnosisFinding 等资源诊断 schema
+4. CLI 从 incident 改为 diagnose
+5. README 更新为本地资源诊断项目
 ```
 
 完成标准：
@@ -2085,19 +2100,11 @@ var/runs/run_xxx/
 python main.py diagnose "为什么 CPU 很高？"
 ```
 
-能创建 run，但可以暂时不诊断。
+能够创建一次诊断 run。
 
----
+### V1-P1：真实资源工具
 
-## V1-P1：实现真实资源工具
-
-目标：
-
-```text
-能真实采集 GPU / CPU / Memory / Process 信息。
-```
-
-任务：
+实现内容：
 
 ```text
 1. get_cpu_snapshot
@@ -2116,19 +2123,9 @@ python main.py diagnose "为什么 CPU 很高？"
 python -m pytest tests/test_tools_*.py
 ```
 
-通过。
+### V1-P2：确定性 ResourceAgent
 
----
-
-## V1-P2：实现 deterministic ResourceAgent
-
-目标：
-
-```text
-根据问题类型执行固定 plan。
-```
-
-任务：
+实现内容：
 
 ```text
 1. infer_resource_type
@@ -2136,8 +2133,8 @@ python -m pytest tests/test_tools_*.py
 3. build_cpu_plan
 4. build_memory_plan
 5. build_mixed_plan
-6. 执行 ToolRegistry
-7. 保存 steps / tool_calls
+6. 通过 ToolRegistry 执行工具
+7. 保存 DiagnosisStep 和 ToolCall
 ```
 
 完成标准：
@@ -2146,28 +2143,21 @@ python -m pytest tests/test_tools_*.py
 python main.py diagnose "为什么 GPU 显存满了？"
 ```
 
-能执行完整工具链。
+能够执行完整工具链。
 
----
+### V1-P3：Detectors
 
-## V1-P3：实现 detectors
-
-目标：
+实现内容：
 
 ```text
-把工具结果变成诊断结论。
-```
-
-任务：
-
-```text
-1. detect_gpu_memory_pressure
-2. detect_gpu_low_utilization_cpu_bottleneck
-3. detect_cpu_saturation
-4. detect_memory_pressure
-5. detect_swap_pressure
-6. detect_oom_event
-7. detect_memory_hogging_process
+1. GPU 显存压力识别
+2. GPU 不可用识别
+3. CPU 饱和识别
+4. CPU 限制 GPU 利用率识别
+5. 内存压力识别
+6. swap 压力识别
+7. OOM 事件识别
+8. 单进程高占用识别
 ```
 
 完成标准：
@@ -2176,42 +2166,27 @@ python main.py diagnose "为什么 GPU 显存满了？"
 fixture eval 能识别 expected_findings。
 ```
 
----
+### V1-P4：报告和审批
 
-## V1-P4：报告和审批
-
-目标：
+实现内容：
 
 ```text
-生成可读诊断报告，并处理危险操作审批。
-```
-
-任务：
-
-```text
-1. build_final_report
-2. create approval for kill_process
+1. 根据 evidence / findings 生成报告
+2. 危险建议生成 Approval
 3. approve / reject
-4. trace 状态更新
+4. run.status 支持 waiting_approval
+5. trace 保存 approvals
 ```
 
 完成标准：
 
 ```text
-危险操作不会直接执行。
+危险操作不会自动执行，必须先人工审批。
 ```
 
----
+### V1-P5：Eval 和真实测试脚本
 
-## V1-P5：Eval 和真实测试脚本
-
-目标：
-
-```text
-证明 Agent 对三类问题有效。
-```
-
-任务：
+实现内容：
 
 ```text
 1. fixture eval
@@ -2228,27 +2203,18 @@ python eval/run_eval.py
 python eval/run_live_smoke.py
 ```
 
-通过。
+### V1-P6：FastAPI 和 Demo
 
----
-
-## V1-P6：FastAPI 和 README
-
-目标：
-
-```text
-可通过 HTTP 调用，可展示。
-```
-
-任务：
+实现内容：
 
 ```text
 1. POST /diagnose
 2. GET /runs
 3. GET /runs/{run_id}
 4. GET /approvals
-5. approve / reject
-6. README demo
+5. POST /approvals/{approval_id}/approve
+6. POST /approvals/{approval_id}/reject
+7. Dockerfile / docker-compose
 ```
 
 完成标准：
@@ -2257,134 +2223,605 @@ python eval/run_live_smoke.py
 uvicorn app.api:app --host 0.0.0.0 --port 18000
 ```
 
-然后 curl 能跑完整流程。
+然后用 curl 能跑完整 HTTP 诊断和审批流程。
+
+### V1-P6.5：稳定化和 trace 一致性
+
+实现内容：
+
+```text
+1. CLI approve / reject 和 HTTP approve / reject 使用同一套 trace 同步逻辑
+2. 普通 CLI trace 输出展示 approvals 状态
+3. ResourceAgentResult 从手写 class 收敛为 schema
+4. 修正 run summary 的 findings / evidence / approvals 计数格式
+5. 增加测试覆盖，确认 CLI approval 后 trace 会同步更新
+```
+
+完成标准：
+
+```bash
+python main.py trace <run_id>
+python main.py approve <approval_id>
+python main.py trace <run_id>
+```
+
+第二次 trace 能看到：
+
+```text
+run.status=completed
+approval.status=executed
+```
+
+---
+
+## V1 后续阶段
+
+### V1-P7：LLM 报告生成器
+
+目标：
+
+```text
+在不改变确定性诊断核心的前提下，增加可选 LLM 报告生成模式。
+```
+
+实现功能：
+
+```text
+1. 新增 agent/llm_client.py
+2. 新增 agent/llm_report.py
+3. ResourceAgent 支持 agent_mode="llm_report"
+4. LLM 只根据已有 tool summaries / evidence / findings / approvals 改写 final_report
+5. LLM 失败时 fallback 到模板报告
+```
+
+边界：
+
+```text
+1. LLM 不选择工具
+2. LLM 不调用工具
+3. LLM 不新增 finding
+4. LLM 不创建或执行危险动作
+5. LLM 不修改 approval / run status
+```
+
+完成标准：
+
+```bash
+python main.py diagnose "为什么 GPU 显存满了？" --agent-mode deterministic
+python main.py diagnose "为什么 GPU 显存满了？" --agent-mode llm_report
+python -m pytest tests/test_llm_report.py tests/test_agent.py tests/test_api.py
+```
+
+测试要求：
+
+```text
+1. fake LLM 正常返回时，final_report 使用 LLM 报告
+2. fake LLM 报错时，fallback 到确定性模板报告
+3. llm_report 不改变 findings / approvals / run.status
+4. pending approval 不会被 LLM 写成 executed
+```
+
+### V1-P8：工具目录和计划 schema
+
+目标：
+
+```text
+为 LLM 决定工具调用打基础，但还不让 LLM 真正接管规划。
+```
+
+实现功能：
+
+```text
+1. 增强 ToolSpec 元数据：name、description、input_schema、permission_level、tags、timeout、适用场景
+2. 新增 ToolCatalog：给 planner / LLM 暴露可用工具清单
+3. 新增 PlannedToolCall / ToolPlan schema
+4. ToolPlan 支持 planner_mode、resource_type、steps、budget、fallback_plan
+5. 所有 plan 都能被序列化保存到 trace 或 run workspace
+```
+
+建议 schema：
+
+```text
+PlannedToolCall:
+  thought
+  action
+  args
+  reason
+  expected_observation
+
+ToolPlan:
+  resource_type
+  planner_mode
+  steps
+  max_steps
+  max_total_timeout_seconds
+```
+
+完成标准：
+
+```text
+1. 现有 deterministic plan 可以转换成 ToolPlan
+2. ToolRegistry.list_tools() 能生成给 LLM 使用的工具目录
+3. plan.json 可以保存到 var/runs/<run_id>/
+```
+
+### V1-P9：LLM Planner 和 PlanValidator
+
+目标：
+
+```text
+让 LLM 在安全边界内提出工具调用计划。
+```
+
+实现功能：
+
+```text
+1. 新增 agent/llm_planner.py
+2. 新增 agent/plan_validator.py
+3. 新增 agent_mode="llm_planner"
+4. LLM 根据用户问题、工具目录、预算和安全规则输出 ToolPlan
+5. PlanValidator 校验 ToolPlan
+6. 校验失败时 fallback 到 deterministic plan
+```
+
+PlanValidator 必须检查：
+
+```text
+1. action 是否存在于 ToolRegistry
+2. args 是否符合对应 input_model
+3. step 数量是否超过预算
+4. 是否重复调用重工具
+5. 是否包含 dangerous 工具
+6. dangerous 工具不能直接执行，必须生成 approval
+7. 总 timeout 是否超过预算
+8. 工具权限是否符合当前 agent_mode
+```
+
+完成标准：
+
+```bash
+python main.py diagnose "训练很慢，帮我看看瓶颈" --agent-mode llm_planner
+python -m pytest tests/test_llm_planner.py tests/test_plan_validator.py
+```
+
+测试要求：
+
+```text
+1. fake LLM 输出合法 plan 时，Agent 按 plan 执行 safe 工具
+2. fake LLM 输出未知工具时，PlanValidator 拒绝并 fallback
+3. fake LLM 输出非法参数时，PlanValidator 拒绝并 fallback
+4. fake LLM 输出 dangerous 工具时，不直接执行，只进入 approval
+5. 所有 LLM 原始 plan 和校验结果写入 trace
+```
+
+### V1-P10：TodoWrite / 任务面板
+
+目标：
+
+```text
+把 plan 从“内部列表”升级为可展示、可追踪、可恢复的任务面板。
+```
+
+实现功能：
+
+```text
+1. 新增 DiagnosisTodo / Task schema
+2. ToolPlan 自动转换成 todo 列表
+3. 每个 todo 有 pending / running / completed / failed / skipped 状态
+4. trace 展示 todos
+5. CLI/API 可以查看某个 run 的任务状态
+```
+
+建议字段：
+
+```text
+todo_id
+run_id
+title
+status
+tool_name
+args
+depends_on
+assigned_agent
+created_at
+updated_at
+result_preview
+error
+```
+
+完成标准：
+
+```bash
+python main.py trace <run_id>
+```
+
+普通 trace 能看到：
+
+```text
+todos:
+- completed get_gpu_snapshot
+- completed list_gpu_processes
+- pending approval kill_process
+```
+
+### V1-P11：Workspace Isolation 增强
+
+目标：
+
+```text
+把每次诊断的原始数据、计划、任务、压缩上下文和报告都隔离保存。
+```
+
+实现功能：
+
+```text
+1. 扩展 var/runs/<run_id>/ 目录结构
+2. 保存 plan.json
+3. 保存 todos.jsonl
+4. 保存 raw/tool_outputs.jsonl
+5. 保存 compact/context.json
+6. 保存 report.md
+7. 支持 debug bundle 打包
+```
+
+建议目录：
+
+```text
+var/runs/run_xxx/
+  raw/
+    tool_outputs.jsonl
+  compact/
+    context.json
+  artifacts/
+    report.md
+  tasks/
+    todos.jsonl
+  plan.json
+  metadata.json
+```
+
+完成标准：
+
+```text
+1. 每次 run 的关键产物都能在独立 workspace 中找到
+2. 删除某个 run workspace 不影响其他 run
+3. 可以根据 workspace 辅助 replay / debug
+```
 
 ---
 
 # 18. 第二版开发阶段
 
-## V2-P1：Hooks
-
-实现 HookManager。
-
-先支持：
+第二版的主线是：
 
 ```text
-PreToolUse
-PostToolUse
-ToolError
-BeforeReport
-RunCompleted
+在 V1 的“可控 LLM 工具规划”基础上，扩展成更完整的 Agent Harness：
+hooks、skills、memory、subagents、agent team、background tasks、autonomous agents。
 ```
 
-用途：
+第二版不是推翻第一版。第二版必须继续保留：
 
 ```text
-1. 安全拦截
-2. 审计日志
-3. 自动 compact
-4. 自动写 memory
-5. 工具失败恢复
+1. ToolRegistry 作为唯一工具执行边界
+2. PlanValidator 作为 LLM plan 的安全边界
+3. Approval 作为 dangerous action 的人工审批边界
+4. TraceStore 作为复盘边界
+5. Workspace Isolation 作为运行隔离边界
 ```
 
----
+## V2-P1：Hooks 和 Error Recovery
 
-## V2-P2：TodoWrite
-
-把 plan 改成显式 todo board。
+目标：
 
 ```text
-Agent 先写诊断任务列表
-再逐项执行
-trace 展示 task 状态
+把诊断流程中的关键节点开放为可插拔 hook，并加入工具失败恢复策略。
 ```
 
----
-
-## V2-P3：Skills
-
-实现 skill manifest 和 skill loader。
-
-第一版 markdown skills 升级为：
+实现功能：
 
 ```text
-list_skills
-load_skill
-search_skill
+1. 新增 hooks/manager.py
+2. 支持 DiagnosisStart / BeforePlan / AfterPlan
+3. 支持 PreToolUse / PostToolUse / ToolError
+4. 支持 BeforeApproval / BeforeReport / RunCompleted / RunFailed
+5. 新增 ErrorRecoveryPolicy
 ```
 
----
-
-## V2-P4：Memory + Compact
-
-新增：
+典型用途：
 
 ```text
-MemoryStore
-Compactor
+1. PreToolUse：阻止不安全工具调用
+2. ToolError：nvidia-smi 失败后降级为 no_gpu 结论
+3. AfterPlan：记录 LLM 原始计划和校验结果
+4. BeforeReport：注入 memory / skills / compact context
+5. RunCompleted：写入历史 memory
 ```
 
-记住：
+完成标准：
 
 ```text
-机器基线
-历史异常
-常见进程
-用户偏好
+1. hook 可以注册和触发
+2. hook 失败不会拖垮主流程
+3. 工具失败能触发 fallback 或结构化错误
 ```
 
----
+## V2-P2：Skills
 
-## V2-P5：Background Tasks
-
-支持：
+目标：
 
 ```text
-60 秒采样
-内存增长趋势
-GPU 利用率趋势
+把诊断经验从代码规则中拆出来，让 planner 可以按场景加载技能。
 ```
 
----
-
-## V2-P6：Subagents
-
-拆成：
+实现功能：
 
 ```text
-GPUAgent
-CPUAgent
-MemoryAgent
-ProcessAgent
-ReportAgent
+1. 新增 skills/ 目录
+2. 定义 skill manifest
+3. 支持 skill search
+4. 支持 skill activation
+5. LLM Planner 可以把相关 skill 作为上下文
 ```
 
-Lead Agent 只做协调。
+skill 示例：
 
----
+```yaml
+name: gpu_cuda_oom
+triggers:
+  - cuda out of memory
+  - 显存爆了
+tools:
+  - get_gpu_snapshot
+  - list_gpu_processes
+  - inspect_process
+detectors:
+  - gpu_memory_pressure
+safe_actions:
+  - inspect_gpu_processes
+dangerous_actions:
+  - kill_process
+```
 
-## V2-P7：Agent Team / Autonomous Agents
-
-引入 task board：
+完成标准：
 
 ```text
-待诊断任务
-后台 monitor 发现异常
-Agent 自动 claim
-Agent 自动生成报告
+1. 用户问 CUDA OOM 时能激活 gpu_cuda_oom skill
+2. skill 能影响 LLM Planner 的工具选择
+3. skill 不允许绕过 ToolRegistry / Approval
 ```
 
----
+## V2-P3：Memory 和基线
 
-## V2-P8：Workspace Isolation
+目标：
 
-每个 run 一个 workspace：
+```text
+让 Agent 记住机器基线、历史问题和用户偏好。
+```
+
+实现功能：
+
+```text
+1. 新增 memory/store.py
+2. 记录机器资源基线
+3. 记录历史诊断摘要
+4. 记录常见安全进程
+5. 记录用户偏好和禁止建议
+6. 把 memory 作为 planner/report 的只读上下文
+```
+
+优先记录：
+
+```text
+1. GPU 空闲显存基线
+2. 常驻进程白名单
+3. 用户不希望 kill 的进程名
+4. 最近重复出现的问题
+5. 某些工具在当前机器上的失败模式
+```
+
+完成标准：
+
+```text
+1. RunCompleted 后可以写入历史 memory
+2. 下一次诊断可以读取相关 memory
+3. memory 只能影响建议，不允许直接执行危险动作
+```
+
+## V2-P4：Subagents
+
+目标：
+
+```text
+把不同资源域拆成独立诊断子 Agent，每个子 Agent 只处理自己的上下文。
+```
+
+实现功能：
+
+```text
+1. GpuDiagnosticAgent
+2. CpuDiagnosticAgent
+3. MemoryDiagnosticAgent
+4. ProcessInspectionAgent
+5. ReportAgent
+6. 定义 SubagentResult schema
+```
+
+边界：
+
+```text
+1. 子 Agent 不直接写最终 run.status
+2. 子 Agent 不直接执行 dangerous action
+3. 子 Agent 输出结构化 evidence / finding / recommendation
+4. LeadResourceAgent 负责汇总
+```
+
+完成标准：
+
+```text
+1. mixed 诊断可以拆给 GPU / CPU / Memory 子 Agent
+2. 每个子 Agent 的结果能单独写入 trace
+3. LeadResourceAgent 能汇总成统一报告
+```
+
+## V2-P5：Agent Team
+
+目标：
+
+```text
+从“一个 Agent 调多个函数”升级为“Lead Agent 协调多个专职 Agent”。
+```
+
+实现功能：
+
+```text
+1. LeadResourceAgent 创建任务
+2. GPU / CPU / Memory / Process / Report Agent claim task
+3. Task Board 记录 assigned_agent
+4. 每个 agent 有自己的 compact context
+5. Lead 汇总所有 agent 结果
+```
+
+工作流：
+
+```text
+用户问题
+  ↓
+LeadResourceAgent 创建任务
+  ↓
+各专职 Agent 执行自己的任务
+  ↓
+结果写回 trace / task board
+  ↓
+Lead 汇总 evidence / findings / approvals
+  ↓
+ReportAgent 生成报告
+```
+
+完成标准：
+
+```text
+1. trace 能看到每个 task 由哪个 agent 完成
+2. 某个子 Agent 失败不会导致整个 run 崩溃
+3. Lead 能根据部分结果生成降级报告
+```
+
+## V2-P6：Background Tasks 和长任务采样
+
+目标：
+
+```text
+支持持续采样和异步诊断，用来发现瞬时瓶颈和趋势问题。
+```
+
+实现功能：
+
+```text
+1. sample_resource_for_60s
+2. watch_process_memory_growth
+3. monitor_gpu_utilization
+4. 后台任务状态：queued / running / completed / failed / cancelled
+5. 采样结果写入 run workspace
+```
+
+适用场景：
+
+```text
+1. 训练任务很慢，但瞬时 GPU 利用率不稳定
+2. 内存泄漏需要观察增长趋势
+3. CPU load 周期性抖动
+4. GPU 利用率长期低于预期
+```
+
+完成标准：
+
+```text
+1. 可以启动 60 秒资源采样任务
+2. trace 能看到任务状态变化
+3. 采样结果能被 detector 或 report 使用
+```
+
+## V2-P7：Autonomous Resource Monitor Agent
+
+目标：
+
+```text
+让 Agent 可以在后台监控资源，发现异常后自动创建诊断任务。
+```
+
+实现功能：
+
+```text
+1. ResourceMonitorAgent 周期性采样
+2. 异常阈值触发 diagnosis task
+3. rate limit，避免重复创建 run
+4. quiet hours，避免打扰用户
+5. 自动生成告警摘要
+6. dangerous action 仍然必须 approval
+```
+
+安全要求：
+
+```text
+1. 后台 Agent 只能自动采集 safe 工具
+2. 后台 Agent 不能自动执行 kill_process
+3. 每类异常需要冷却时间
+4. 所有后台 run 必须写 trace
+5. 用户可以关闭 autonomous 模式
+```
+
+完成标准：
+
+```text
+1. 后台监控发现 GPU / CPU / Memory 异常后能创建 run
+2. 重复异常不会无限创建 run
+3. 用户能查看后台 run 的 trace 和报告
+```
+
+## V2-P8：Workspace Isolation 完整化和 Debug Bundle
+
+目标：
+
+```text
+把 workspace isolation 从“每个 run 一个目录”升级为完整调试和复盘能力。
+```
+
+实现功能：
+
+```text
+1. 每个 subagent 有独立 context 目录
+2. 每个 background task 有独立采样目录
+3. compact context 可复用给 report / memory / skills
+4. 支持导出 debug bundle
+5. 支持 replay 某次 run 的 plan / tool_result / finding
+```
+
+完整目录：
 
 ```text
 var/runs/run_xxx/
+  metadata.json
+  plan.json
+  raw/
+  compact/
+  artifacts/
+  tasks/
+  agent_contexts/
+    gpu/
+    cpu/
+    memory/
+    process/
+    report/
+  background/
+  debug_bundle.zip
 ```
 
-支持 replay、debug bundle、长期采样。
+完成标准：
+
+```text
+1. 可以从 workspace 打包一次完整诊断材料
+2. 可以 replay fixture 化的工具结果
+3. 多 Agent 和后台任务的上下文互不污染
+```
 
 ---
 

@@ -13,47 +13,13 @@ from app.schemas import (
     DiagnosisStep,
     EvidenceItem,
     Recommendation,
+    ResourceAgentResult,
     ResourceIncident,
     RiskLevel,
     RunStatus,
     utc_now,
 )
 from tools.registry import ToolExecutionResult, ToolRegistry, default_registry
-
-
-class ResourceAgentResult:
-    def __init__(
-        self,
-        run: DiagnosisRun,
-        steps: list[DiagnosisStep],
-        tool_results: list[ToolExecutionResult],
-        evidence_items: list[EvidenceItem],
-        findings: list[DiagnosisFinding],
-        final_report: str,
-        requires_approval: bool,
-        approvals: list[dict[str, Any]],
-    ) -> None:
-        self.run = run
-        self.steps = steps
-        self.tool_results = tool_results
-        self.evidence_items = evidence_items
-        self.findings = findings
-        self.final_report = final_report
-        self.requires_approval = requires_approval
-        self.approvals = approvals
-
-    def model_dump(self) -> dict[str, Any]:
-        """把整个结果转为普通字典"""
-        return {
-            "run": self.run.model_dump(mode="json"),
-            "steps": [step.model_dump(mode="json") for step in self.steps],
-            "tool_results": [result.model_dump(mode="json") for result in self.tool_results],
-            "evidence_items": [item.model_dump(mode="json") for item in self.evidence_items],
-            "findings": [finding.model_dump(mode="json") for finding in self.findings],
-            "final_report": self.final_report,
-            "requires_approval": self.requires_approval,
-            "approvals": self.approvals,
-        }
 
 
 class ResourceAgent:
@@ -170,9 +136,10 @@ class ResourceAgent:
         run.final_report = final_report
         run.root_cause = summarize_root_cause(findings)
         run.summary = (
-            f"Executed {len(tool_results)} resource tools for {resource_type.value}; "
-            f"detected {len(findings)} findings and {len(evidence_items)} evidence items."
-            f"and {len(approvals)} approvals."
+            f"Executed {count_phrase(len(tool_results), 'resource tool')} for {resource_type.value}; "
+            f"detected {count_phrase(len(findings), 'finding')}, "
+            f"{count_phrase(len(evidence_items), 'evidence item')}, "
+            f"and {count_phrase(len(approvals), 'approval')}."
         )
         run.ended_at = utc_now()
 
@@ -231,6 +198,10 @@ def summarize_root_cause(findings: list[DiagnosisFinding]) -> str:
     if not findings:
         return "no detector findings matched current thresholds"
     return "; ".join(finding.finding_type for finding in findings[:3])
+
+def count_phrase(count: int, noun: str) -> str:
+    suffix = "" if count == 1 else "s"
+    return f"{count} {noun}{suffix}"
 
 def approval_args_from_recommendation(action: Recommendation) -> dict[str, Any]:
     args: dict[str, Any] = {}

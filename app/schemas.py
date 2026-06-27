@@ -407,3 +407,27 @@ class Approval(StrictBaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     decided_at: datetime | None = None
     executed_at: datetime | None = None
+
+
+class ResourceAgentResult(StrictBaseModel):
+    """ResourceAgent.diagnose() 返回给 CLI/API/Trace 的完整结果。
+
+    字段说明：
+    - run：本次诊断运行的顶层状态。
+    - steps：诊断步骤，包括资源类型推断和每个工具调用。
+    - tool_results：工具层返回的标准化结果。
+    - evidence_items：detector 生成的关键证据。
+    - findings：detector 生成的诊断发现。
+    - final_report：最终展示给用户的 Markdown 报告。
+    - requires_approval：本次诊断是否产生待审批危险建议。
+    - approvals：审批记录快照，保存为 dict 是为了和持久化/HTTP JSON 输出保持一致。
+    """
+
+    run: DiagnosisRun
+    steps: list[DiagnosisStep] = Field(default_factory=list)
+    tool_results: list[Any] = Field(default_factory=list)
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    findings: list[DiagnosisFinding] = Field(default_factory=list)
+    final_report: str
+    requires_approval: bool = False
+    approvals: list[dict[str, Any]] = Field(default_factory=list)

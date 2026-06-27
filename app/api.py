@@ -8,6 +8,7 @@ from pydantic import Field
 from agent.resource_agent import ResourceAgent
 from approval.service import ApprovalService
 from approval.store import ApprovalStore
+from approval.trace_sync import sync_approval_trace
 from app.schemas import IncidentSource, ResourceIncident, ResourceType, Severity, StrictBaseModel
 from trace.store import TraceStore
 
@@ -33,11 +34,28 @@ class DiagnoseRequest(StrictBaseModel):
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
+
+def build_trace_store() -> TraceStore:
+    return TraceStore()
+
+
+def build_approval_store() -> ApprovalStore:
+    return ApprovalStore()
+
+
+def build_approval_service() -> ApprovalService:
+    return ApprovalService(store=build_approval_store())
+
+
+def build_resource_agent(approval_service: ApprovalService, agent_mode: str) -> ResourceAgent:
+    return ResourceAgent(approval_service=approval_service, agent_mode=agent_mode)
+
 #提交诊断请求，
 @app.post("/diagnose")
 def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
     #保存agent的运行结果和过程记录
-    trace_store = TraceStore()
+    trace_store = build_trace_store()
+    approval_service = build_approval_service()
     incident = ResourceIncident(
         #把外部api请求转换为整个内部使用的ResourceIncident
         #多了一个字段：source：cli、api、scheduled、scheduled
@@ -47,20 +65,20 @@ def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
         source=IncidentSource.API,
         host=request.host,
     )
-    result = ResourceAgent(approval_service=ApprovalService(), agent_mode=request.agent_mode).diagnose(incident)
+    result = build_resource_agent(approval_service=approval_service, agent_mode=request.agent_mode).diagnose(incident)
     trace_store.save_agent_result(result)
-    return result.model_dump()
+    return result.model_dump(mode="json")
 
 #返回最近agent的运行记录
 @app.get("/runs")
 def list_runs(limit: int = Query(default=20, ge=1, le=100)) -> list[dict[str, Any]]:
-    return TraceStore().list_runs(limit=limit)
+    return build_trace_store().list_runs(limit=limit)
 
 #根据run_id查询某次完整的诊断过程的接口
 @app.get("/runs/{run_id}")
 def get_run_trace(run_id: str) -> dict[str, Any]:
     try:
-        return TraceStore().get_trace(run_id)
+        return build_trace_store().get_trace(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -68,28 +86,36 @@ def get_run_trace(run_id: str) -> dict[str, Any]:
 @app.get("/approvals")
 def list_approvals(status: str | None = Query(default="pending")) -> list[dict[str, Any]]:
     normalized = status.strip() if status else None
-    return [approval.model_dump(mode="json") for approval in ApprovalStore().list(status=normalized)]
+    return [approval.model_dump(mode="json") for approval in build_approval_store().list(status=normalized)]
 
 #批准审批
 #审批通过后，执行并返回工具执行结果
 #如果已经拒绝或已经执行过则返回400
 @app.post("/approvals/{approval_id}/approve")
 def approve(approval_id: str) -> dict[str, Any]:
+    trace_store = build_trace_store()
+    approval_store = build_approval_store()
+    service = ApprovalService(store=approval_store)
     try:
-        approval, tool_result = ApprovalService().approve(approval_id)
+        approval, tool_result = service.approve(approval_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sync_approval_trace(trace_store, approval_store, approval)
     return {"approval": approval.model_dump(mode="json"), "tool_result": tool_result.model_dump(mode="json")}
 
 #拒绝
 @app.post("/approvals/{approval_id}/reject")
 def reject(approval_id: str) -> dict[str, Any]:
+    trace_store = build_trace_store()
+    approval_store = build_approval_store()
+    service = ApprovalService(store=approval_store)
     try:
-        approval = ApprovalService().reject(approval_id)
+        approval = service.reject(approval_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sync_approval_trace(trace_store, approval_store, approval)
     return approval.model_dump(mode="json")

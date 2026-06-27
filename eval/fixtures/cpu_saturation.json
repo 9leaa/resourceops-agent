@@ -1,0 +1,33 @@
+{
+  "get_cpu_snapshot": {
+    "cpu_count": 8,
+    "load_avg_1m": 12.5,
+    "load_avg_5m": 10.1,
+    "load_avg_15m": 8.4,
+    "overall_cpu_percent": 91
+  },
+  "list_top_cpu_processes": {
+    "processes": [
+      {
+        "pid": 23456,
+        "username": "zcj",
+        "cpu_percent": 95,
+        "memory_percent": 2.1,
+        "rss_mb": 800,
+        "command": "python preprocess.py"
+      }
+    ]
+  },
+  "get_memory_snapshot": {
+    "total_mb": 32000,
+    "available_mb": 16000,
+    "used_percent": 50,
+    "swap_total_mb": 8192,
+    "swap_used_percent": 0
+  },
+  "get_gpu_snapshot": {
+    "available": false,
+    "error": "nvidia-smi not found",
+    "gpus": []
+  }
+}

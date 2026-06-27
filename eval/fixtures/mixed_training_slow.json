@@ -1,0 +1,50 @@
+{
+  "get_gpu_snapshot": {
+    "available": true,
+    "gpus": [
+      {
+        "index": 0,
+        "name": "NVIDIA Test GPU",
+        "utilization_gpu_percent": 8,
+        "memory_used_mb": 3000,
+        "memory_total_mb": 24576,
+        "memory_used_percent": 12.2
+      }
+    ]
+  },
+  "get_cpu_snapshot": {
+    "cpu_count": 8,
+    "load_avg_1m": 18.0,
+    "overall_cpu_percent": 89
+  },
+  "get_memory_snapshot": {
+    "total_mb": 32000,
+    "available_mb": 10000,
+    "used_percent": 68,
+    "swap_total_mb": 8192,
+    "swap_used_percent": 0
+  },
+  "list_gpu_processes": {
+    "available": true,
+    "processes": []
+  },
+  "list_top_cpu_processes": {
+    "processes": [
+      {
+        "pid": 45678,
+        "username": "zcj",
+        "cpu_percent": 120,
+        "rss_mb": 1000,
+        "command": "python train.py --num-workers 32"
+      }
+    ]
+  },
+  "list_top_memory_processes": {
+    "processes": []
+  },
+  "check_oom_events": {
+    "available": true,
+    "source": "dmesg",
+    "events": []
+  }
+}
