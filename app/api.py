@@ -21,12 +21,14 @@ class DiagnoseRequest(StrictBaseModel):
     #资源类型，可以空，让agent自己判断
     #严重等级：
     #故障发生的主机：可空
-    #agent模式：默认是规则型，可选llm生成诊断报告，参数只能完整匹配这俩字段
+    #agent模式：默认是规则型，也可以让 LLM 只写报告或只提出工具计划
     description: str = Field(..., min_length=1)
     resource_type: ResourceType | None = None
     severity: Severity = Severity.WARNING
     host: str | None = None
-    agent_mode: str = Field(default="deterministic", pattern="^(deterministic|llm_report)$")
+    agent_mode: str | None = Field(default=None, pattern="^(deterministic|llm_report|llm_planner|llm_full)$")
+    planner_mode: str | None = Field(default=None, pattern="^(deterministic|llm)$")
+    report_mode: str | None = Field(default=None, pattern="^(template|llm)$")
 
 #get接口，访问curl http://localhost:8000/health返回status：ok
 
@@ -46,10 +48,18 @@ def build_approval_store() -> ApprovalStore:
 def build_approval_service() -> ApprovalService:
     return ApprovalService(store=build_approval_store())
 
-
-def build_resource_agent(approval_service: ApprovalService, agent_mode: str) -> ResourceAgent:
-    return ResourceAgent(approval_service=approval_service, agent_mode=agent_mode)
-
+def build_resource_agent(
+    approval_service: ApprovalService,
+    agent_mode: str | None = None,
+    planner_mode: str | None = None,
+    report_mode: str | None = None,
+) -> ResourceAgent:
+    return ResourceAgent(
+        approval_service=approval_service,
+        agent_mode=agent_mode,
+        planner_mode=planner_mode,
+        report_mode=report_mode,
+    )
 #提交诊断请求，
 @app.post("/diagnose")
 def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
@@ -65,7 +75,12 @@ def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
         source=IncidentSource.API,
         host=request.host,
     )
-    result = build_resource_agent(approval_service=approval_service, agent_mode=request.agent_mode).diagnose(incident)
+    result = build_resource_agent(
+        approval_service=approval_service,
+        agent_mode=request.agent_mode,
+        planner_mode=request.planner_mode,
+        report_mode=request.report_mode,
+    ).diagnose(incident)
     trace_store.save_agent_result(result)
     return result.model_dump(mode="json")
 

@@ -31,11 +31,18 @@ def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RESOURCEOPS_TRACE_DB", str(tmp_path / "resourceops.sqlite3"))
     monkeypatch.setenv("RESOURCEOPS_APPROVAL_STORE", str(tmp_path / "approvals.jsonl"))
 
-    def build_fixture_agent(approval_service: ApprovalService, agent_mode: str) -> ResourceAgent:
+    def build_fixture_agent(
+        approval_service: ApprovalService,
+        agent_mode: str | None = None,
+        planner_mode: str | None = None,
+        report_mode: str | None = None,
+    ) -> ResourceAgent:
         return ResourceAgent(
             registry=MemoryPressureRegistry(),
             approval_service=approval_service,
             agent_mode=agent_mode,
+            planner_mode=planner_mode,
+            report_mode=report_mode,
         )
 
     monkeypatch.setattr(api, "build_resource_agent", build_fixture_agent)

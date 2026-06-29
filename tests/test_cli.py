@@ -1,8 +1,9 @@
-from app.cli import main
+from app.cli import RichTodoEventSink, ask_approval_choice, main, run_interactive_approvals
 from agent.resource_agent import ResourceAgent
 from approval.service import ApprovalService
 from approval.store import ApprovalStore
 from app.schemas import ResourceIncident
+from rich.console import Console
 from tests.fixtures import MemoryPressureRegistry
 from trace.store import TraceStore
 
@@ -87,3 +88,180 @@ def test_cli_approve_syncs_trace(monkeypatch, tmp_path, capsys) -> None:
     assert "已批准并模拟执行" in captured.out
     assert trace["run"]["status"] == "completed"
     assert trace["approvals"][0]["status"] == "executed"
+
+
+def build_memory_approval_run(tmp_path):
+    trace_store = TraceStore(tmp_path / "resourceops.sqlite3")
+    approval_store = ApprovalStore(tmp_path / "approvals.jsonl")
+    approval_service = ApprovalService(store=approval_store)
+
+    result = ResourceAgent(
+        registry=MemoryPressureRegistry(),
+        approval_service=approval_service,
+    ).diagnose(
+        ResourceIncident(description="为什么内存快满了？", resource_type="memory")
+    )
+    trace_store.save_agent_result(result)
+    return result, trace_store, approval_store
+
+
+def test_interactive_approval_approve_syncs_trace(monkeypatch, tmp_path, capsys) -> None:
+    result, trace_store, approval_store = build_memory_approval_run(tmp_path)
+    approval_id = result.approvals[0]["approval_id"]
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    run_interactive_approvals(
+        result.run.run_id,
+        result.approvals,
+        trace_store=trace_store,
+        approval_store=approval_store,
+    )
+
+    captured = capsys.readouterr()
+    trace = trace_store.get_trace(result.run.run_id)
+    approval_task = [todo for todo in trace["todos"] if todo.get("approval_id") == approval_id][0]
+
+    assert "待审批操作" in captured.out
+    assert "已批准并模拟执行" in captured.out
+    assert "run_status=completed" in captured.out
+    assert trace["run"]["status"] == "completed"
+    assert trace["approvals"][0]["status"] == "executed"
+    assert approval_task["status"] == "completed"
+
+
+def test_interactive_approval_reject_syncs_trace(monkeypatch, tmp_path, capsys) -> None:
+    result, trace_store, approval_store = build_memory_approval_run(tmp_path)
+    approval_id = result.approvals[0]["approval_id"]
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    run_interactive_approvals(
+        result.run.run_id,
+        result.approvals,
+        trace_store=trace_store,
+        approval_store=approval_store,
+    )
+
+    captured = capsys.readouterr()
+    trace = trace_store.get_trace(result.run.run_id)
+    approval_task = [todo for todo in trace["todos"] if todo.get("approval_id") == approval_id][0]
+
+    assert "已拒绝审批" in captured.out
+    assert "run_status=completed" in captured.out
+    assert trace["run"]["status"] == "completed"
+    assert trace["approvals"][0]["status"] == "rejected"
+    assert approval_task["status"] == "skipped"
+
+
+def test_interactive_approval_refreshes_todo_sink_after_reject(monkeypatch, tmp_path) -> None:
+    class FakeTodoSink:
+        def __init__(self) -> None:
+            self.snapshots = []
+
+        def load_todos(self, todos, current_group=None) -> None:
+            self.snapshots.append((todos, current_group))
+
+    result, trace_store, approval_store = build_memory_approval_run(tmp_path)
+    approval_id = result.approvals[0]["approval_id"]
+    sink = FakeTodoSink()
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    run_interactive_approvals(
+        result.run.run_id,
+        result.approvals,
+        trace_store=trace_store,
+        approval_store=approval_store,
+        event_sink=sink,
+    )
+
+    assert sink.snapshots
+    assert sink.snapshots[-1][1] == "approval"
+
+    final_todos = sink.snapshots[-1][0]
+    approval_task = [todo for todo in final_todos if todo.approval_id == approval_id][0]
+    approval_phase = [
+        todo for todo in final_todos
+        if todo.level == "phase" and todo.display_group == "approval"
+    ][0]
+
+    assert approval_task.status == "skipped"
+    assert approval_task.result_preview == "rejected: kill_process"
+    assert approval_phase.status == "completed"
+
+
+def test_interactive_approval_skip_keeps_run_waiting(monkeypatch, tmp_path, capsys) -> None:
+    result, trace_store, approval_store = build_memory_approval_run(tmp_path)
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "s")
+    run_interactive_approvals(
+        result.run.run_id,
+        result.approvals,
+        trace_store=trace_store,
+        approval_store=approval_store,
+    )
+
+    captured = capsys.readouterr()
+    trace = trace_store.get_trace(result.run.run_id)
+
+    assert "已跳过审批，保持 pending" in captured.out
+    assert "pending_approvals=1" in captured.out
+    assert "run_status=waiting_approval" in captured.out
+    assert trace["run"]["status"] == "waiting_approval"
+    assert trace["approvals"][0]["status"] == "pending"
+
+
+def test_rich_todo_panel_keeps_tool_and_action_sections(tmp_path) -> None:
+    result, trace_store, _approval_store = build_memory_approval_run(tmp_path)
+    todos = trace_store.list_todos(result.run.run_id)
+
+    sink = object.__new__(RichTodoEventSink)
+    sink.phases = [todo for todo in todos if todo.level == "phase"]
+    sink.todos = [todo for todo in todos if todo.level == "task"]
+    sink.current_group_override = "approval"
+    sink.live = None
+    sink._closed = False
+    sink._paused = False
+
+    rendered = sink._render_tasks()
+    console = Console(record=True, width=140)
+    console.print(rendered)
+    output = console.export_text()
+
+    assert "Tool execution" in output
+    assert "get_memory_snapshot" in output
+    assert "Approval" in output
+    assert "kill_process" in output
+    assert "Action execution" in output
+    assert "reserved for action executor" in output
+
+
+def test_approval_prompt_pauses_live_without_printing_task_panel(monkeypatch) -> None:
+    class FakeTodoSink:
+        def __init__(self) -> None:
+            self.pause_calls = []
+            self.resume_calls = 0
+
+        def pause(self, print_snapshot=False) -> None:
+            self.pause_calls.append(print_snapshot)
+
+        def resume(self) -> None:
+            self.resume_calls += 1
+
+    sink = FakeTodoSink()
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    choice = ask_approval_choice(
+        1,
+        1,
+        {
+            "approval_id": "appr_test",
+            "action": "kill_process",
+            "risk": "dangerous",
+            "reason": "test",
+            "args": {"pid": 123},
+        },
+        event_sink=sink,
+    )
+
+    assert choice == "n"
+    assert sink.pause_calls == [False]
+    assert sink.resume_calls == 1

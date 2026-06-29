@@ -2,7 +2,7 @@
 
 ResourceOps Agent is a local-first resource diagnosis agent for GPU, CPU, and Memory problems. It is based on the IncidentOps harness shape, but the product scope is real local resource diagnosis rather than simulated service incidents.
 
-Current status: **V1-P7.5**.
+Current status: **V1-P10.8**.
 
 ## What Works Now
 
@@ -39,8 +39,14 @@ Current status: **V1-P7.5**.
 - Structured `ResourceAgentResult` shared by Agent, CLI, API, and TraceStore.
 - Optional `llm_report` mode that rewrites only the final report from existing evidence, findings, recommendations, and approvals.
 - Bounded report context builder gives LLM richer but controlled tool details such as top processes, GPU memory, memory/swap metrics, and OOM event previews.
+- `ToolCatalog` and structured `ToolPlan` / `PlannedToolCall` for every diagnosis run.
+- Optional `llm_planner` mode where LLM proposes a tool plan, `PlanValidator` checks it, and invalid plans fallback to deterministic planning.
+- TodoWrite-style task tracking for tool plans, persisted in trace.
+- Rich Live CLI task panel with run phases and retained Tool execution / Approval / Action execution details.
+- Optional interactive approval flow with `--interactive-approval`, including colored approval prompts and y/n/s/q decisions.
 
-V1-P7.5 still does not execute real dangerous actions. Approval only simulates execution after a human approve command.
+V1-P10.8 still does not execute real dangerous actions. Approval only simulates execution after a human approve command or interactive approval.
+LLM planner cannot call tools directly; it only proposes a plan that must pass validation.
 
 ## Quick Start
 
@@ -49,7 +55,7 @@ cd /home/zcj/resourceops-agent
 python main.py diagnose "为什么 CPU 很高？"
 ```
 
-The command executes a deterministic resource plan, runs detectors, creates approvals for dangerous recommendations, writes a trace to `var/resourceops.sqlite3`, and prints a V1-P7.5 diagnosis report.
+The command executes a deterministic resource plan, runs detectors, creates approvals for dangerous recommendations, writes a trace to `var/resourceops.sqlite3`, and prints a diagnosis report.
 
 Run with optional LLM report rewriting:
 
@@ -67,6 +73,14 @@ RESOURCEOPS_LLM_MODEL=replace-with-your-model
 
 In `llm_report` mode, trace includes `build_report_context` and `llm_report` steps. The first records the compact context given to the LLM, and the second records whether LLM generation succeeded or fell back.
 
+Run with LLM tool planning:
+
+```bash
+python main.py diagnose "训练很慢，帮我看看瓶颈" --agent-mode llm_planner
+```
+
+In `llm_planner` mode, trace includes an `llm_planner` step. It records whether the LLM plan was accepted, validation errors if rejected, and the selected fallback or LLM plan.
+
 Show recent runs:
 
 ```bash
@@ -77,6 +91,20 @@ Show a trace:
 
 ```bash
 python main.py trace <run_id>
+```
+
+Run diagnosis and handle pending approvals in the same terminal:
+
+```bash
+python main.py diagnose "为什么内存快满了？" \
+  --resource-type memory \
+  --interactive-approval
+```
+
+The interactive approval prompt supports:
+
+```text
+y=批准 / n=拒绝 / s=跳过 / q=退出
 ```
 
 Run fixture eval:
@@ -163,7 +191,7 @@ resourceops-agent/
 
 ## 后续路线
 
-当前已完成到 **V1-P8**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
+当前已完成到 **V1-P10.8**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
 
 V1-P8 已完成：
 
@@ -172,11 +200,27 @@ V1-P8 已完成：
 - `ResourceAgent` 现在按 `ToolPlan.steps` 执行工具，诊断行为与 P7.5 保持一致。
 - trace 普通视图和 JSON 视图都能看到本次使用的工具计划。
 
+V1-P9 已完成：
+
+- 新增 `llm_planner` 模式，LLM 根据用户问题和 `ToolCatalog` 提出候选 `ToolPlan`。
+- 新增 `PlanValidator`，校验工具名、参数 schema、步数预算、重复调用和权限边界。
+- LLM 候选计划不合法、LLM 不可用或调用失败时，自动 fallback 到 deterministic plan。
+- trace 记录 `llm_planner` 中间状态，包括候选计划、校验错误、fallback 原因和最终选择的计划。
+
+V1-P10 / P10.8 已完成：
+
+- `ToolPlan` 会转换成可持久化的 `DiagnosisTodo`。
+- trace 能保存和展示 phase/task todo 状态。
+- CLI Rich Live 面板展示 Planning tools、Tool execution、Report、Approval、Action execution。
+- Current tasks 保留 Tool execution 历史工具任务、Approval 审批任务和 Action execution 预留阶段。
+- approve / reject 后同步 approval task、Approval phase 和 run.status。
+- `--interactive-approval` 支持在 diagnose 后批量列出 pending approvals 并逐个处理。
+
 ### V1 后续
 
-- V1-P9：LLM Planner + PlanValidator。LLM 可以提出工具调用计划，但必须经过系统校验；非法计划 fallback 到 deterministic plan。
-- V1-P10：TodoWrite / 任务面板。把 plan 转成可展示、可追踪、可恢复的任务列表。
 - V1-P11：Workspace Isolation 增强。把 plan、todos、raw tool outputs、compact context、report 都保存到 `var/runs/<run_id>/`。
+- V1-P12：Action Executor dry-run。定义 ActionSpec / ActionExecutor / ActionResult，审批通过后仍只模拟执行，并记录 pre-check / post-check。
+- V1-P13：真实安全动作执行。只开放白名单动作，必须通过 approval、参数校验、pre-check、dry-run 和 post-check。
 
 ### V2 方向
 

@@ -21,7 +21,9 @@ class OpenAICompatibleLlmClient:
     timeout_seconds: float = 20.0
     temperature: float = 0.2
 
-    def generate_report(self, prompt: str) -> str:
+    def generate_text(self, *, system_prompt: str, user_prompt: str) -> str:
+        """调用 OpenAI-compatible chat completion，返回纯文本内容。"""
+
         response = httpx.post(
             f"{self.base_url.rstrip('/')}/chat/completions",
             headers={
@@ -32,15 +34,8 @@ class OpenAICompatibleLlmClient:
                 "model": self.model,
                 "temperature": self.temperature,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是 ResourceOps 诊断报告撰写器。"
-                            "你只能根据用户提供的结构化证据写报告，不能编造事实，"
-                            "不能新增工具结果，不能改变审批状态。"
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
                 ],
             },
             timeout=self.timeout_seconds,
@@ -54,6 +49,16 @@ class OpenAICompatibleLlmClient:
             raise RuntimeError("invalid llm response shape") from exc
 
         return str(content).strip()
+
+    def generate_report(self, prompt: str) -> str:
+        return self.generate_text(
+            system_prompt=(
+                "你是 ResourceOps 诊断报告撰写器。"
+                "你只能根据用户提供的结构化证据写报告，不能编造事实，"
+                "不能新增工具结果，不能改变审批状态。"
+            ),
+            user_prompt=prompt,
+        )
 
 
 def build_default_llm_client_from_env() -> LlmClient | None:

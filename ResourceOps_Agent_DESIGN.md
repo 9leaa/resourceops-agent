@@ -1824,6 +1824,39 @@ updated_at
 
 第二版让 LLM 或 Agent 自己维护 TodoWrite。
 
+后续要把 TodoWrite 从“工具调用列表”升级为“分层任务面板”：
+
+```text
+大任务：run 级阶段进度，固定显示在 CLI 顶部
+小任务：当前阶段内部任务，显示在大任务下面，随阶段切换
+```
+
+大任务建议固定为：
+
+```text
+Planning tools
+Tool execution
+Report
+Approval
+Action execution
+```
+
+小任务建议从当前阶段展开：
+
+```text
+Tool execution:
+  get_cpu_snapshot
+  list_top_cpu_processes
+  get_memory_snapshot
+
+Action execution:
+  kill_process dry-run
+  release_cache dry-run
+  restart_service dry-run
+```
+
+Action execution 在 V1 先预留，只展示结构和状态，不执行真实危险命令。
+
 ---
 
 ## 16.3 subagent 预留
@@ -2422,6 +2455,14 @@ ToolCatalogItem:
 让 LLM 在安全边界内提出工具调用计划。
 ```
 
+当前状态：
+
+```text
+已完成。
+LLM planner 只提出候选 ToolPlan；候选计划必须通过 PlanValidator。
+校验失败、LLM 不可用、LLM 输出无法解析时，执行 deterministic fallback plan。
+```
+
 实现功能：
 
 ```text
@@ -2431,19 +2472,19 @@ ToolCatalogItem:
 4. LLM 根据用户问题、工具目录、预算和安全规则输出 ToolPlan
 5. PlanValidator 校验 ToolPlan
 6. 校验失败时 fallback 到 deterministic plan
+7. trace 增加 llm_planner step，记录候选计划、校验错误、fallback 原因和最终选择的 plan
 ```
 
 PlanValidator 必须检查：
 
 ```text
-1. action 是否存在于 ToolRegistry
+1. tool_name 是否存在于 ToolRegistry
 2. args 是否符合对应 input_model
 3. step 数量是否超过预算
 4. 是否重复调用重工具
-5. 是否包含 dangerous 工具
-6. dangerous 工具不能直接执行，必须生成 approval
-7. 总 timeout 是否超过预算
-8. 工具权限是否符合当前 agent_mode
+5. 是否包含 write / dangerous / approval-required 工具
+6. 工具权限是否符合当前 agent_mode
+7. resource_type 是否与本次诊断一致
 ```
 
 完成标准：
@@ -2459,8 +2500,8 @@ python -m pytest tests/test_llm_planner.py tests/test_plan_validator.py
 1. fake LLM 输出合法 plan 时，Agent 按 plan 执行 safe 工具
 2. fake LLM 输出未知工具时，PlanValidator 拒绝并 fallback
 3. fake LLM 输出非法参数时，PlanValidator 拒绝并 fallback
-4. fake LLM 输出 dangerous 工具时，不直接执行，只进入 approval
-5. 所有 LLM 原始 plan 和校验结果写入 trace
+4. fake LLM 输出 dangerous / approval-required 工具时，PlanValidator 拒绝并 fallback
+5. 所有 LLM 候选 plan、校验结果、fallback 原因和 selected plan 写入 trace
 ```
 
 ### V1-P10：TodoWrite / 任务面板
@@ -2471,14 +2512,25 @@ python -m pytest tests/test_llm_planner.py tests/test_plan_validator.py
 把 plan 从“内部列表”升级为可展示、可追踪、可恢复的任务面板。
 ```
 
+定位：
+
+```text
+P10 先作为后续开发阶段保留。
+它不新增诊断算法，不做真实动作执行，只增加任务状态层。
+后续 P11 workspace、P12 action executor、V2 subagents 都复用这个任务状态层。
+```
+
 实现功能：
 
 ```text
-1. 新增 DiagnosisTodo / Task schema
+1. 新增 TodoStatus / DiagnosisTodo schema
 2. ToolPlan 自动转换成 todo 列表
 3. 每个 todo 有 pending / running / completed / failed / skipped 状态
 4. trace 展示 todos
 5. CLI/API 可以查看某个 run 的任务状态
+6. ResourceAgent 执行工具时同步更新 todo 状态
+7. ResourceAgentResult 返回 todos
+8. TraceStore 持久化 todos
 ```
 
 建议字段：
@@ -2486,10 +2538,13 @@ python -m pytest tests/test_llm_planner.py tests/test_plan_validator.py
 ```text
 todo_id
 run_id
+todo_index
 title
 status
+source
 tool_name
 args
+planned_call_id
 depends_on
 assigned_agent
 created_at
@@ -2511,6 +2566,446 @@ todos:
 - completed get_gpu_snapshot
 - completed list_gpu_processes
 - pending approval kill_process
+```
+
+P10 不做：
+
+```text
+1. 不做真实 kill / restart / clean cache
+2. 不做任务并行
+3. 不做任务恢复/重试
+4. 不做多 Agent 分配
+5. 不做 workspace 文件落盘增强
+6. 不做 Rich Live 刷新式终端 UI，这部分放到 P10.5
+```
+
+### V1-P10.5：分层任务面板 / Live Todo UI
+
+目标：
+
+```text
+把 P10 的普通 todos 展示升级为类似 Claude Code 的刷新式任务面板。
+```
+
+设计动机：
+
+```text
+P10 只跟踪工具执行阶段，所以当 llm_planner 或 llm_report 很慢时，
+用户看到的是“终端卡住”，而不是“Agent 正在规划 / 正在写报告”。
+
+P10.5 要把整个 run 拆成大任务阶段，再把当前阶段内部拆成小任务。
+大任务始终固定在终端顶部，小任务根据当前阶段变化。
+```
+
+大任务阶段：
+
+```text
+1. Planning tools
+   - 推断资源类型
+   - 构建 ToolCatalog
+   - deterministic / LLM planner 生成 ToolPlan
+   - PlanValidator 校验
+
+2. Tool execution
+   - 从 ToolPlan 展开每个工具调用
+   - 每个工具调用是一个小任务
+   - 工具完成后显示 result_preview 或 error
+
+3. Report
+   - 构建 report_context
+   - template_report 或 llm_report
+   - LLM 超时、失败时显示 fallback 原因
+
+4. Approval
+   - 根据 finding/recommendation 创建 approval
+   - 展示 pending / approved / rejected / executed
+
+5. Action execution
+   - 后续 P12/P13 使用
+   - 当前只预留阶段和 schema，不执行真实命令
+```
+
+小任务范围：
+
+```text
+P10.5 先做 Tool execution 小任务。
+Action execution 小任务只预留字段，不接入真实执行。
+Planning / Report / Approval 阶段先只作为大任务展示，不强制展开细粒度小任务。
+```
+
+建议扩展 DiagnosisTodo：
+
+```text
+level: phase | task
+parent_todo_id: str | None
+display_group: planning | tools | report | approval | actions
+sort_order: int
+title: str
+status: pending | running | completed | failed | skipped | waiting_approval
+result_preview: str | None
+error: str | None
+```
+
+推荐的固定大任务：
+
+```text
+phase_planning_tools
+phase_tool_execution
+phase_report
+phase_approval
+phase_action_execution
+```
+
+事件边界：
+
+```text
+ResourceAgent 只发事件，不负责终端 UI。
+CLI 负责接收事件并渲染 Live 面板。
+trace 只保存最终状态，不保存每一次刷新帧。
+```
+
+建议事件：
+
+```text
+on_phase_snapshot(phases)
+on_phase_started(phase)
+on_phase_completed(phase)
+on_phase_failed(phase)
+on_todo_snapshot(todos)
+on_todo_updated(todo, todos)
+```
+
+CLI 渲染方案：
+
+```text
+使用 rich.live.Live 每次重新渲染完整 frame。
+
+frame =
+  大任务面板：固定在上方
+  任务详情面板：显示在下方
+```
+
+任务详情面板保留策略：
+
+```text
+底部任务详情不能只展示“当前阶段”，否则进入 Report / Approval 后，
+用户会看不到前面 Tool execution 到底执行了哪些工具。
+
+因此底部面板按分组保留：
+
+1. Tool execution
+   - 始终保留
+   - 展示所有已执行/失败/跳过的工具任务
+
+2. Approval
+   - 有 approval task 时展示
+   - y / n / s / q 后刷新为 completed / skipped / waiting_approval
+
+3. Action execution
+   - 始终保留分组
+   - P10.8 先显示 reserved for action executor
+   - P12/P13 接入真实 action task 后显示 action execution 小任务
+```
+
+颜色规范：
+
+```text
+大任务标题：bright_blue / bold blue
+小任务标题：blue / dim blue
+running：cyan
+completed：green
+failed：red
+waiting_approval：yellow
+pending：dim
+```
+
+示例展示：
+
+```text
+ResourceOps Agent
+
+Phases
+  [✓] Planning tools
+  [●] Tool execution
+  [ ] Report
+  [ ] Approval
+  [ ] Action execution
+
+Tool execution
+  [✓] get_cpu_snapshot        cpu=15.2%, load1=0.8
+  [●] list_top_cpu_processes  running...
+  [ ] get_memory_snapshot
+```
+
+实现要求：
+
+```text
+1. 不能继续用多次 print(todo_panel) 堆叠输出
+2. 不能把 rich / ANSI 颜色写进 ResourceAgent
+3. ResourceAgent 只更新状态并发事件
+4. CLI Live renderer 负责颜色、刷新、布局
+5. --json 模式必须禁用 Live UI，只输出结构化 JSON
+6. conda run 手动测试时建议使用 --no-capture-output 或 python -u
+```
+
+完成标准：
+
+```bash
+python main.py diagnose "为什么 CPU 很高？" --planner-mode llm --report-mode llm
+```
+
+预期体验：
+
+```text
+1. LLM planner 慢时，顶部显示 Planning tools running
+2. ToolPlan 生成后，Tool execution 阶段展开小任务
+3. 工具执行时，小任务原地刷新状态
+4. LLM report 慢时，顶部显示 Report running
+5. 最终输出 report，并在 trace 中保存最终 phase/todo 状态
+```
+
+### V1-P10.6：Rich Live 刷新式 CLI 面板
+
+目标：
+
+```text
+把 P10.5 的分层任务状态真正接入 CLI，做到同一块终端区域刷新，
+而不是每次状态变化都 print 一份新的 todo 列表。
+```
+
+实现功能：
+
+```text
+1. CLI diagnose 在非 --json 模式下创建 RichTodoEventSink
+2. ResourceAgent 通过 AgentEventSink 发 phase / task 状态快照
+3. CLI 使用 rich.live.Live 渲染两个面板：
+   - ResourceOps Agent：大任务阶段
+   - Current tasks：保留 Tool execution / Approval / Action execution 的任务详情
+4. phase 使用 bright_blue，task 使用 blue / dim blue
+5. completed / running / failed / waiting_approval / skipped 使用不同图标和颜色
+6. --json 模式禁用 Live UI，避免破坏结构化输出
+```
+
+注意：
+
+```text
+1. Rich UI 只属于 CLI 展示层
+2. ResourceAgent 不直接 import rich，也不写 ANSI 颜色
+3. trace 不保存每一帧刷新，只保存最终 todo 状态
+4. conda run 测试实时刷新时建议加 --no-capture-output 和 python -u
+```
+
+完成标准：
+
+```bash
+conda run --no-capture-output -n zcj_hello python -u main.py diagnose \
+  "为什么 CPU 很高？" \
+  --resource-type cpu \
+  --planner-mode llm \
+  --report-mode llm
+```
+
+预期体验：
+
+```text
+1. 规划阶段：Planning tools 显示 running
+2. 工具执行阶段：Current tasks 展示每个工具的执行状态
+3. 报告阶段：Report 显示 running
+4. 进入审批阶段后，Current tasks 仍保留 Tool execution 的历史工具任务
+5. 最终 report 输出前，面板显示最终 phase / task 状态
+```
+
+### V1-P10.7：Approval / Action execution 阶段展示和 trace 同步
+
+目标：
+
+```text
+把审批也纳入任务面板和 trace，而不是只在 report 文本里展示 approval_id。
+```
+
+实现功能：
+
+```text
+1. 根据 approvals 生成 approval task todo
+2. Approval 大任务阶段支持 waiting_approval / completed
+3. approval task 记录 approval_id、action、risk、status
+4. CLI trace 的 todos 展示 approval_id
+5. approve / reject 命令执行后同步更新 trace 中：
+   - approvals 表
+   - approval task todo
+   - Approval phase todo
+   - run.status
+6. Action execution 阶段继续预留：
+   - 当前没有 action executor
+   - 默认显示 skipped / reserved for action executor
+```
+
+状态规则：
+
+```text
+approval pending  -> approval task waiting_approval
+approval executed -> approval task completed
+approval rejected -> approval task skipped
+
+只要还有 pending approval：
+  run.status = waiting_approval
+
+所有 approval 都 resolved 后：
+  run.status = completed
+```
+
+完成标准：
+
+```bash
+python main.py diagnose "为什么内存快满了？" --resource-type memory
+python main.py approve <approval_id>
+python main.py trace <run_id>
+```
+
+trace 中应该能看到：
+
+```text
+Approval phase completed
+approval task completed / skipped
+run_status completed
+```
+
+### V1-P10.8：Interactive Approval / 批量交互审批
+
+目标：
+
+```text
+在 CLI diagnose 后提供可选的交互审批体验。
+当一次诊断产生一个或多个 pending approval 时，用户可以在同一个终端里逐个批准、拒绝、跳过或退出。
+```
+
+设计边界：
+
+```text
+默认行为不变：
+  python main.py diagnose ...
+
+仍然是非阻塞诊断：
+  1. 生成 report
+  2. 创建 pending approvals
+  3. run.status = waiting_approval
+  4. 输出 run_id 后退出
+
+只有显式加参数时才进入交互审批：
+  python main.py diagnose ... --interactive-approval
+```
+
+为什么不默认等待审批：
+
+```text
+1. API / 脚本 / 自动化任务不能被 input() 阻塞
+2. 诊断和审批是两个不同生命周期
+3. 有些审批需要用户先看 trace、确认 PID、确认上下文后再决定
+4. 后续 Web UI / API approval 仍然要复用同一套异步审批机制
+```
+
+交互规则：
+
+```text
+diagnose 完成并保存 trace 后：
+
+1. CLI 先列出本次 run 的所有 pending approvals
+2. 然后按顺序询问用户：
+   y / yes / approve：批准，并模拟执行 dangerous action
+   n / no / reject：拒绝
+   s / skip：跳过，保持 pending
+   q / quit：退出交互审批，剩余 pending 保持不变
+3. 每处理一个 approval，立即调用 sync_approval_trace()
+4. 最后输出 pending_approvals 和 run_status
+```
+
+Live UI 行为：
+
+```text
+如果 diagnose 使用 --interactive-approval 且不是 --json：
+
+1. Rich Live 面板从诊断阶段一直保留到交互审批结束
+2. 诊断阶段结束时，Approval phase 显示 waiting_approval
+3. 用户选择 y / n 后：
+   - approval 写入 ApprovalStore
+   - sync_approval_trace() 更新 TraceStore
+   - CLI 从 TraceStore 重新读取 todos
+   - Live 面板刷新 Approval phase 和 approval task
+4. 用户选择 s / q 时：
+   - approval 保持 pending
+   - 面板继续显示 waiting_approval
+5. 交互审批结束后，CLI 关闭 Live，并打印最终面板快照
+```
+
+注意：
+
+```text
+交互审批阶段的 UI 以 trace 中的最终 todo 状态为准。
+ResourceAgent 不参与审批后的 UI 刷新，因为 ResourceAgent.diagnose() 已经结束。
+CLI 在需要 input() 时会临时暂停 Rich Live，显示审批提示并读取输入；
+输入结束后再恢复 Live，避免全屏面板盖住输入提示。
+审批提示使用颜色区分风险和状态：
+  dangerous / rejected：red
+  pending / skipped / waiting_approval：yellow
+  approved / executed / completed：green
+输入提示使用 y=批准 / n=拒绝 / s=跳过 / q=退出，避免 Rich markup 吃掉 [y] 这类文本。
+```
+
+多个审批的处理方式：
+
+```text
+一次性列出：
+
+- [1/3] appr_xxx action=kill_process risk=dangerous status=pending
+- [2/3] appr_yyy action=restart_service risk=dangerous status=pending
+- [3/3] appr_zzz action=renice_process risk=write status=pending
+
+然后逐个进入审批提示。
+这样用户先知道本次 run 一共有多少危险操作，再逐项决策。
+```
+
+CLI 示例：
+
+```bash
+python main.py diagnose "为什么内存快满了？" \
+  --resource-type memory \
+  --interactive-approval
+```
+
+示例输出：
+
+```text
+待审批操作 run_id=run_xxx count=1
+- [1/1] appr_xxx action=kill_process risk=dangerous status=pending
+
+审批 [1/1]
+approval_id=appr_xxx
+action=kill_process
+risk=dangerous
+reason=Killing a process is destructive and must be approved.
+args={"pid": 12345, "command_preview": "kill 12345"}
+选择：[y]批准 / [n]拒绝 / [s]跳过 / [q]退出 >
+```
+
+实现要求：
+
+```text
+1. API 不进入交互审批
+2. --json 模式不进入交互审批
+3. 默认 diagnose 不进入交互审批
+4. approve / reject 继续保留为独立命令
+5. 每次 approve / reject 后立即同步 trace
+6. skip / quit 不修改 approval 状态
+7. 当前 approve 仍然只是 simulated execution，不真实 kill
+```
+
+完成标准：
+
+```text
+1. y：approval.status=executed，approval todo=completed，run.status=completed
+2. n：approval.status=rejected，approval todo=skipped，run.status=completed
+3. s：approval.status=pending，approval todo=waiting_approval，run.status=waiting_approval
+4. q：未处理的 approval 保持 pending
 ```
 
 ### V1-P11：Workspace Isolation 增强
@@ -2555,6 +3050,107 @@ var/runs/run_xxx/
 1. 每次 run 的关键产物都能在独立 workspace 中找到
 2. 删除某个 run workspace 不影响其他 run
 3. 可以根据 workspace 辅助 replay / debug
+```
+
+### V1-P12：Action Executor dry-run
+
+目标：
+
+```text
+把 recommendation / approval 后面的“动作执行”抽象出来，但仍然只做 dry-run。
+```
+
+为什么 P12 才做：
+
+```text
+P10 有任务状态，P11 有 workspace 产物隔离之后，动作执行才有足够审计基础。
+真实执行之前必须先有 dry-run、pre-check、post-check 和 trace 记录。
+```
+
+实现功能：
+
+```text
+1. 新增 ActionSpec，描述允许的动作、参数 schema、风险等级和是否需要审批
+2. 新增 ActionExecutor，统一执行动作
+3. 新增 ActionResult，记录 dry-run / pre-check / post-check / simulated_execution
+4. approval approve 后不再直接写死 simulated tool result，而是调用 ActionExecutor(dry_run=True)
+5. 支持 kill_process 的 dry-run，不真实 kill
+6. trace 记录 action_result
+7. CLI/API approve 输出 action_result
+```
+
+建议 schema：
+
+```text
+ActionSpec:
+  name
+  description
+  input_schema
+  risk
+  requires_approval
+  dry_run_supported
+  real_execution_supported
+
+ActionResult:
+  action
+  args
+  mode              # dry_run / real
+  status            # success / failed / blocked
+  pre_check
+  execution
+  post_check
+  preview
+  error
+  created_at
+```
+
+完成标准：
+
+```text
+1. approve kill_process 后仍不真实 kill
+2. trace 中能看到 action_result.mode=dry_run
+3. action_result 记录将要执行什么、为什么没真实执行
+4. 无 approval 时不能执行 requires_approval 动作
+```
+
+### V1-P13：真实安全动作执行
+
+目标：
+
+```text
+在极小白名单内开放真实动作执行。
+```
+
+安全边界：
+
+```text
+1. 默认关闭真实执行，需要显式配置 RESOURCEOPS_ENABLE_REAL_ACTIONS=true
+2. 只允许 allowlist 中的动作
+3. dangerous 动作必须 approval
+4. args 必须通过 schema 校验
+5. pre-check 必须通过
+6. dry-run 必须先成功
+7. post-check 必须记录
+8. 禁止操作当前进程、系统关键进程、root-owned 关键服务
+9. 所有真实执行都写 trace 和 workspace
+```
+
+首批建议只开放：
+
+```text
+1. inspect_process：safe，已存在，只读
+2. renice_process：write，需要 approval
+3. kill_process：dangerous，需要 approval + 二次确认 + allowlist
+```
+
+完成标准：
+
+```text
+1. 默认配置下真实执行不可用
+2. 开启配置后，只能执行 allowlist 动作
+3. 未审批 dangerous 动作会被拒绝
+4. action_result 记录 pre-check / dry-run / execution / post-check
+5. 出错时不会误标 completed
 ```
 
 ---

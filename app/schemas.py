@@ -99,6 +99,35 @@ class StepStatus(str, Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
 
+class TodoStatus(str, Enum):
+    """诊断任务状态"""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    WAITING_APPROVAL = "waiting_approval"
+
+class TodoLevel(str, Enum):
+    """任务层级。
+
+    PHASE：大任务阶段，例如 Planning tools / Tool execution。
+    TASK：阶段内部小任务，例如 get_cpu_snapshot。
+    """
+
+    PHASE = "phase"
+    TASK = "task"
+
+
+class TodoDisplayGroup(str, Enum):
+    """任务展示分组。"""
+
+    PLANNING = "planning"
+    TOOLS = "tools"
+    REPORT = "report"
+    APPROVAL = "approval"
+    ACTIONS = "actions"
+
 
 class ToolPermissionLevel(str, Enum):
     """工具权限等级。
@@ -125,7 +154,7 @@ class PlannerMode(str, Enum):
     """工具计划由谁生成。
 
     DETERMINISTIC：由当前固定规则 planner 生成。
-    LLM：未来由 LLM planner 生成。
+    LLM：由 LLM planner 生成，并已通过 PlanValidator 校验。
     FALLBACK：LLM planner 失败或计划不合法时使用的兜底计划。
     """
 
@@ -133,6 +162,26 @@ class PlannerMode(str, Enum):
     LLM = "llm"
     FALLBACK = "fallback"
 
+class AgentPlannerMode(str, Enum):
+    """run 级别的工具规划模式。
+
+    DETERMINISTIC：固定规则 planner 决定工具。
+    LLM：LLM planner 先提出工具计划，再经过 PlanValidator 校验。
+    """
+
+    DETERMINISTIC = "deterministic"
+    LLM = "llm"
+
+
+class ReportMode(str, Enum):
+    """最终报告生成模式。
+
+    TEMPLATE：使用本地固定模板报告。
+    LLM：使用 LLM 在受控上下文内改写报告。
+    """
+
+    TEMPLATE = "template"
+    LLM = "llm"
 
 class EvidenceCategory(str, Enum):
     """证据分类，用于报告和 trace 展示时过滤/分组。"""
@@ -234,6 +283,8 @@ class DiagnosisRun(StrictBaseModel):
     user_input: str
     resource_type: ResourceType = ResourceType.MIXED
     agent_mode: str = "deterministic"
+    planner_mode: AgentPlannerMode = AgentPlannerMode.DETERMINISTIC
+    report_mode: ReportMode = ReportMode.TEMPLATE
     final_report: str | None = None
     root_cause: str | None = None
     summary: str | None = None
@@ -391,8 +442,8 @@ class ToolPlan(StrictBaseModel):
     """一次诊断运行的工具执行计划。
 
     P8 的核心对象。它把“要执行哪些工具”从零散 list[PlannedAction] 升级为
-    可校验、可追踪、可复用的结构化计划。当前仍由 deterministic planner 生成；
-    未来 LLM planner 也必须输出同样的结构。
+    可校验、可追踪、可复用的结构化计划。deterministic planner 和 P9 的
+    LLM planner 都必须输出同样的结构。
 
     字段说明：
     - plan_id：计划 ID。
@@ -418,6 +469,29 @@ class ToolPlan(StrictBaseModel):
     tool_catalog_version: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
+class DiagnosisTodo(StrictBaseModel):
+    """一次诊断 run 中的可追踪任务。"""
+
+    todo_id: str = Field(default_factory=lambda: new_id("todo"))
+    run_id: str
+    todo_index: int = Field(..., ge=0)
+    title: str
+    status: TodoStatus = TodoStatus.PENDING
+    level: TodoLevel = TodoLevel.TASK
+    parent_todo_id: str | None = None
+    display_group: TodoDisplayGroup = TodoDisplayGroup.TOOLS
+    sort_order: int = Field(default=0, ge=0)
+    source: str = "tool_plan"
+    tool_name: str | None = None
+    args: dict[str, Any] = Field(default_factory=dict)
+    planned_call_id: str | None = None
+    approval_id: str | None = None
+    depends_on: list[str] = Field(default_factory=list)
+    assigned_agent: str | None = None
+    result_preview: str | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 class EvidenceItem(StrictBaseModel):
     """detector 从工具结果里提取出来的一条具体证据。
@@ -560,3 +634,4 @@ class ResourceAgentResult(StrictBaseModel):
     final_report: str
     requires_approval: bool = False
     approvals: list[dict[str, Any]] = Field(default_factory=list)
+    todos: list[DiagnosisTodo] = Field(default_factory=list)

@@ -6,6 +6,7 @@ from tools.registry import ToolExecutionResult
 
 NON_TOOL_ACTIONS = {
     "infer_resource_type",
+    "llm_planner",
     "build_tool_plan",
     "build_report_context",
     "llm_report",
