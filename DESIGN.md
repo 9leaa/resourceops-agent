@@ -40,6 +40,11 @@ V1 后续路线：
 - V1-P10.7：审批任务进入 todo/trace，approve/reject 后同步 approval task、phase 和 run.status。
 - V1-P10.8：交互审批入口。默认异步不阻塞，显式 `--interactive-approval` 后批量列出并逐个审批。
 - V1-P11：Workspace Isolation 增强，保存 plan、todos、raw、compact、report 等运行产物。
+  - P11.1：Workspace Writer 基础落盘，写 metadata、plan、todos、report、tool outputs、steps、evidence、findings、approvals。
+  - P11.2：Compact Context 落盘，保存 LLM report 看到的 `compact/report_context.json`。
+  - P11.3：CLI workspace 查看命令，支持 `workspace <run_id>`、`--json`、`--show-report`、`--show-context`。
+  - P11.4：审批后同步 workspace，approve/reject/interactive approval 后更新 approvals、todos、metadata。
+  - P11.5：Debug Bundle 打包，生成 `var/bundles/<run_id>.tar.gz`，支持 `bundle <run_id>` 和 `--json`。
 - V1-P12：Action Executor dry-run，定义可审批动作执行器，但只模拟执行和记录 pre-check / post-check。
 - V1-P13：真实安全动作执行，只开放白名单动作，必须 approval、pre-check、dry-run、post-check 全部通过。
 

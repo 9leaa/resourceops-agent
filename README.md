@@ -218,7 +218,7 @@ V1-P10 / P10.8 已完成：
 
 ### V1 后续
 
-- V1-P11：Workspace Isolation 增强。把 plan、todos、raw tool outputs、compact context、report 都保存到 `var/runs/<run_id>/`。
+- V1-P11：Workspace Isolation 增强。把 plan、todos、raw tool outputs、compact context、report 都保存到 `var/runs/<run_id>/`，支持通过 `workspace <run_id>` 查看，并支持 `bundle <run_id>` 导出 debug bundle。
 - V1-P12：Action Executor dry-run。定义 ActionSpec / ActionExecutor / ActionResult，审批通过后仍只模拟执行，并记录 pre-check / post-check。
 - V1-P13：真实安全动作执行。只开放白名单动作，必须通过 approval、参数校验、pre-check、dry-run 和 post-check。
 

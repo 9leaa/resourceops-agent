@@ -1,3 +1,5 @@
+import json
+
 from app.cli import RichTodoEventSink, ask_approval_choice, main, run_interactive_approvals
 from agent.resource_agent import ResourceAgent
 from approval.service import ApprovalService
@@ -63,8 +65,10 @@ def test_trace_cli_prints_approvals(monkeypatch, capsys) -> None:
 def test_cli_approve_syncs_trace(monkeypatch, tmp_path, capsys) -> None:
     trace_db = tmp_path / "resourceops.sqlite3"
     approval_path = tmp_path / "approvals.jsonl"
+    workspace_root = tmp_path / "runs"
     monkeypatch.setenv("RESOURCEOPS_TRACE_DB", str(trace_db))
     monkeypatch.setenv("RESOURCEOPS_APPROVAL_STORE", str(approval_path))
+    monkeypatch.setenv("RESOURCEOPS_WORKSPACE_ROOT", str(workspace_root))
 
     trace_store = TraceStore()
     approval_store = ApprovalStore()
@@ -77,6 +81,9 @@ def test_cli_approve_syncs_trace(monkeypatch, tmp_path, capsys) -> None:
         ResourceIncident(description="为什么内存快满了？", resource_type="memory")
     )
     trace_store.save_agent_result(result)
+    from workspace.writer import WorkspaceWriter
+
+    WorkspaceWriter().write_agent_result(result)
 
     approval_id = result.approvals[0]["approval_id"]
 
@@ -88,6 +95,16 @@ def test_cli_approve_syncs_trace(monkeypatch, tmp_path, capsys) -> None:
     assert "已批准并模拟执行" in captured.out
     assert trace["run"]["status"] == "completed"
     assert trace["approvals"][0]["status"] == "executed"
+
+    workspace_approvals = json.loads(
+        (workspace_root / result.run.run_id / "trace" / "approvals.json").read_text(encoding="utf-8")
+    )
+    workspace_todos = json.loads(
+        (workspace_root / result.run.run_id / "todos.json").read_text(encoding="utf-8")
+    )
+    approval_task = [todo for todo in workspace_todos if todo.get("approval_id") == approval_id][0]
+    assert workspace_approvals[0]["status"] == "executed"
+    assert approval_task["status"] == "completed"
 
 
 def build_memory_approval_run(tmp_path):
@@ -265,3 +282,82 @@ def test_approval_prompt_pauses_live_without_printing_task_panel(monkeypatch) ->
     assert choice == "n"
     assert sink.pause_calls == [False]
     assert sink.resume_calls == 1
+
+
+def test_workspace_cli_prints_file_list(monkeypatch, tmp_path, capsys) -> None:
+    result, _trace_store, _approval_store = build_memory_approval_run(tmp_path)
+    workspace_root = tmp_path / "runs"
+    monkeypatch.setenv("RESOURCEOPS_WORKSPACE_ROOT", str(workspace_root))
+
+    from workspace.writer import WorkspaceWriter
+
+    WorkspaceWriter().write_agent_result(result)
+
+    exit_code = main(["workspace", result.run.run_id])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"workspace={workspace_root / result.run.run_id}" in captured.out
+    assert "metadata.json" in captured.out
+    assert "plan.json" in captured.out
+    assert "compact/report_context.json" in captured.out
+    assert "trace/approvals.json" in captured.out
+
+
+def test_workspace_cli_json_output(monkeypatch, tmp_path, capsys) -> None:
+    result, _trace_store, _approval_store = build_memory_approval_run(tmp_path)
+    workspace_root = tmp_path / "runs"
+    monkeypatch.setenv("RESOURCEOPS_WORKSPACE_ROOT", str(workspace_root))
+
+    from workspace.writer import WorkspaceWriter
+
+    WorkspaceWriter().write_agent_result(result)
+
+    exit_code = main(["workspace", result.run.run_id, "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["run_id"] == result.run.run_id
+    assert payload["metadata"]["workspace_version"] == "p11.5"
+    assert any(item["relative_path"] == "report.md" for item in payload["files"])
+
+
+def test_workspace_cli_show_report_and_context(monkeypatch, tmp_path, capsys) -> None:
+    result, _trace_store, _approval_store = build_memory_approval_run(tmp_path)
+    workspace_root = tmp_path / "runs"
+    monkeypatch.setenv("RESOURCEOPS_WORKSPACE_ROOT", str(workspace_root))
+
+    from workspace.writer import WorkspaceWriter
+
+    WorkspaceWriter().write_agent_result(result)
+
+    exit_code = main(["workspace", result.run.run_id, "--show-report"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Resource Diagnosis Report" in captured.out
+
+    exit_code = main(["workspace", result.run.run_id, "--show-context"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["available"] is False
+
+
+def test_bundle_cli_creates_debug_bundle(monkeypatch, tmp_path, capsys) -> None:
+    result, _trace_store, _approval_store = build_memory_approval_run(tmp_path)
+    workspace_root = tmp_path / "runs"
+    monkeypatch.setenv("RESOURCEOPS_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("RESOURCEOPS_BUNDLE_ROOT", str(tmp_path / "bundles"))
+
+    from workspace.writer import WorkspaceWriter
+
+    WorkspaceWriter().write_agent_result(result)
+
+    exit_code = main(["bundle", result.run.run_id, "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["run_id"] == result.run.run_id
+    assert payload["bundle"].endswith(f"{result.run.run_id}.tar.gz")

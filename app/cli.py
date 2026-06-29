@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
 from typing import Any, Sequence
 
 from rich.console import Console, Group
@@ -16,6 +18,8 @@ from approval.store import ApprovalStore
 from approval.trace_sync import sync_approval_trace
 from app.schemas import ApprovalStatus, DiagnosisTodo, IncidentSource, ResourceIncident, ResourceType, Severity
 from trace.store import TraceStore
+
+from workspace.writer import WorkspaceWriter
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="resourceops", description="ResourceOps Agent local CLI")
@@ -85,8 +89,36 @@ def build_parser() -> argparse.ArgumentParser:
     reject_parser.add_argument("approval_id")
     reject_parser.add_argument("--json", action="store_true")
 
+    workspace_parser = subparsers.add_parser("workspace", help="Show files for a run workspace.")
+    workspace_parser.add_argument("run_id")
+    workspace_parser.add_argument("--json", action="store_true", help="Print workspace metadata and file list as JSON.")
+    workspace_parser.add_argument("--show-report", action="store_true", help="Print report.md from the workspace.")
+    workspace_parser.add_argument(
+        "--show-context",
+        action="store_true",
+        help="Print compact/report_context.json from the workspace.",
+    )
+
+    bundle_parser = subparsers.add_parser("bundle", help="Create a debug bundle from a run workspace.")
+    bundle_parser.add_argument("run_id")
+    bundle_parser.add_argument("--json", action="store_true")
+
     return parser
 
+def write_workspace_result(result) -> None:
+    try:
+        WorkspaceWriter().write_agent_result(result)
+    except OSError as exc:
+        print(f"workspace write failed: {exc}", file=sys.stderr)
+
+
+def sync_workspace_from_trace(run_id: str, trace_store: TraceStore) -> None:
+    try:
+        WorkspaceWriter().update_from_trace(run_id, trace_store)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"workspace sync failed: {exc}", file=sys.stderr)
 
 def handle_diagnose(args: argparse.Namespace) -> int:
     incident = ResourceIncident(
@@ -121,6 +153,7 @@ def handle_diagnose(args: argparse.Namespace) -> int:
             event_sink.close()
    
     trace_store.save_agent_result(result)
+    write_workspace_result(result)
 
     if args.json:
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
@@ -183,6 +216,7 @@ def run_interactive_approvals(
                     print_interactive_lines(event_sink, f"审批处理失败：{approval_id} error={error}")
                 else:
                     sync_approval_trace(trace_store, approval_store, approved)
+                    sync_workspace_from_trace(run_id, trace_store)
                     refresh_todo_sink_from_trace(event_sink, run_id, trace_store)
                     decisions.append(("approved", approval_id))
                     print_interactive_lines(
@@ -200,6 +234,7 @@ def run_interactive_approvals(
                     print_interactive_lines(event_sink, f"审批处理失败：{approval_id} error={error}")
                 else:
                     sync_approval_trace(trace_store, approval_store, rejected)
+                    sync_workspace_from_trace(run_id, trace_store)
                     refresh_todo_sink_from_trace(event_sink, run_id, trace_store)
                     decisions.append(("rejected", approval_id))
                     print_interactive_lines(event_sink, f"已拒绝审批：{rejected.approval_id}")
@@ -511,6 +546,100 @@ def handle_runs(args: argparse.Namespace) -> int:
     else:
         print("当前没有 diagnosis runs。")
     return 0
+
+
+def handle_workspace(args: argparse.Namespace) -> int:
+    run_dir = WorkspaceWriter().run_dir(args.run_id)
+    if not run_dir.exists() or not run_dir.is_dir():
+        print(f"workspace not found: {run_dir}", file=sys.stderr)
+        return 1
+
+    payload = workspace_payload(run_dir)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.show_report:
+        print_workspace_file(run_dir / "report.md")
+        return 0
+
+    if args.show_context:
+        print_workspace_json_file(run_dir / "compact" / "report_context.json")
+        return 0
+
+    print(f"workspace={run_dir}")
+    metadata = payload.get("metadata") or {}
+    if metadata:
+        print(
+            f"run_id={metadata.get('run_id')} "
+            f"status={metadata.get('status')} "
+            f"resource_type={metadata.get('resource_type')} "
+            f"workspace_version={metadata.get('workspace_version')}"
+        )
+    print("\nfiles:")
+    for item in payload["files"]:
+        print(f"- {item['relative_path']}")
+    return 0
+
+
+def handle_bundle(args: argparse.Namespace) -> int:
+    try:
+        bundle_path = WorkspaceWriter().create_bundle(args.run_id)
+    except OSError as exc:
+        print(f"bundle failed: {exc}", file=sys.stderr)
+        return 1
+
+    payload = {
+        "run_id": args.run_id,
+        "bundle": str(bundle_path),
+        "size_bytes": bundle_path.stat().st_size,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"bundle={bundle_path}")
+    return 0
+
+
+def workspace_payload(run_dir: Path) -> dict[str, Any]:
+    files = []
+    for path in sorted(item for item in run_dir.rglob("*") if item.is_file()):
+        files.append(
+            {
+                "relative_path": path.relative_to(run_dir).as_posix(),
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+
+    return {
+        "workspace": str(run_dir),
+        "run_id": run_dir.name,
+        "metadata": read_workspace_json(run_dir / "metadata.json"),
+        "files": files,
+    }
+
+
+def read_workspace_json(path: Path) -> dict[str, Any] | list[Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def print_workspace_file(path: Path) -> None:
+    if not path.exists():
+        print(f"workspace file not found: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    print(path.read_text(encoding="utf-8").rstrip())
+
+
+def print_workspace_json_file(path: Path) -> None:
+    payload = read_workspace_json(path)
+    if payload is None:
+        print(f"workspace file not found: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
 
 class RichTodoEventSink:
     def __init__(self) -> None:
@@ -884,6 +1013,7 @@ def handle_approve(args: argparse.Namespace) -> int:
     approval_store = ApprovalStore()
     approval, tool_result = ApprovalService(store=approval_store).approve(args.approval_id)
     sync_approval_trace(trace_store, approval_store, approval)
+    sync_workspace_from_trace(approval.run_id, trace_store)
     payload = {"approval": approval.model_dump(mode="json"), "tool_result": tool_result.model_dump(mode="json")}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -897,6 +1027,7 @@ def handle_reject(args: argparse.Namespace) -> int:
     approval_store = ApprovalStore()
     approval = ApprovalService(store=approval_store).reject(args.approval_id)
     sync_approval_trace(trace_store, approval_store, approval)
+    sync_workspace_from_trace(approval.run_id, trace_store)
     if args.json:
         print(json.dumps(approval.model_dump(mode="json"), ensure_ascii=False, indent=2))
     else:
@@ -919,6 +1050,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return handle_approve(args)
     if args.command == "reject":
         return handle_reject(args)
+    if args.command == "workspace":
+        return handle_workspace(args)
+    if args.command == "bundle":
+        return handle_bundle(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

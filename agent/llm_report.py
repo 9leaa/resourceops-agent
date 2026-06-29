@@ -148,6 +148,7 @@ def build_report_prompt(*, report_context: dict[str, Any]) -> str:
 6. 必须包含这些章节：问题概览、关键证据、诊断发现、建议操作、审批状态、风险说明。
 7. tool_context 是经过代码筛选、限量和脱敏后的上下文；不要声称没有明细，除非 tool_context 中确实没有对应字段。
 8. evidence_items 和 findings 是确定性诊断结果；如果 tool_context 和 findings 表达不同，优先以 findings 为诊断结论，并用 tool_context 做解释补充。
+9. 不要生成或推荐 JSON 中没有明确给出的 CLI 命令；如果只有 action 名称，只能写 action 名称、风险和审批状态。
 
 诊断上下文 JSON：
 ```json

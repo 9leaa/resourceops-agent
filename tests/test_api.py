@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from agent.resource_agent import ResourceAgent
@@ -30,6 +32,7 @@ def test_diagnose_endpoint(monkeypatch, tmp_path) -> None:
 def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RESOURCEOPS_TRACE_DB", str(tmp_path / "resourceops.sqlite3"))
     monkeypatch.setenv("RESOURCEOPS_APPROVAL_STORE", str(tmp_path / "approvals.jsonl"))
+    monkeypatch.setenv("RESOURCEOPS_WORKSPACE_ROOT", str(tmp_path / "runs"))
 
     def build_fixture_agent(
         approval_service: ApprovalService,
@@ -85,3 +88,14 @@ def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
     updated_trace = updated_trace_response.json()
     assert updated_trace["run"]["status"] == "completed"
     assert updated_trace["approvals"][0]["status"] == "executed"
+
+    workspace_approvals = json.loads(
+        (tmp_path / "runs" / run_id / "trace" / "approvals.json").read_text(encoding="utf-8")
+    )
+    workspace_todos = json.loads(
+        (tmp_path / "runs" / run_id / "todos.json").read_text(encoding="utf-8")
+    )
+    approval_task = [todo for todo in workspace_todos if todo.get("approval_id") == approval_id][0]
+
+    assert workspace_approvals[0]["status"] == "executed"
+    assert approval_task["status"] == "completed"

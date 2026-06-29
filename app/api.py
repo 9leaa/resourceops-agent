@@ -12,6 +12,7 @@ from approval.trace_sync import sync_approval_trace
 from app.schemas import IncidentSource, ResourceIncident, ResourceType, Severity, StrictBaseModel
 from trace.store import TraceStore
 
+from workspace.writer import WorkspaceWriter
 
 app = FastAPI(title="ResourceOps Agent", version="0.1.0")
 
@@ -36,6 +37,19 @@ class DiagnoseRequest(StrictBaseModel):
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
+def write_workspace_result(result) -> None:
+    try:
+        WorkspaceWriter().write_agent_result(result)
+    except OSError:
+        return
+
+def sync_workspace_from_trace(run_id: str, trace_store: TraceStore) -> None:
+    try:
+        WorkspaceWriter().update_from_trace(run_id, trace_store)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 def build_trace_store() -> TraceStore:
     return TraceStore()
@@ -82,6 +96,7 @@ def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
         report_mode=request.report_mode,
     ).diagnose(incident)
     trace_store.save_agent_result(result)
+    write_workspace_result(result)
     return result.model_dump(mode="json")
 
 #返回最近agent的运行记录
@@ -118,6 +133,7 @@ def approve(approval_id: str) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sync_approval_trace(trace_store, approval_store, approval)
+    sync_workspace_from_trace(approval.run_id, trace_store)
     return {"approval": approval.model_dump(mode="json"), "tool_result": tool_result.model_dump(mode="json")}
 
 #拒绝
@@ -133,4 +149,5 @@ def reject(approval_id: str) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sync_approval_trace(trace_store, approval_store, approval)
+    sync_workspace_from_trace(approval.run_id, trace_store)
     return approval.model_dump(mode="json")

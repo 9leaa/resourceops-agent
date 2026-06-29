@@ -3016,40 +3016,435 @@ args={"pid": 12345, "command_preview": "kill 12345"}
 把每次诊断的原始数据、计划、任务、压缩上下文和报告都隔离保存。
 ```
 
-实现功能：
+设计原则：
 
 ```text
-1. 扩展 var/runs/<run_id>/ 目录结构
-2. 保存 plan.json
-3. 保存 todos.jsonl
-4. 保存 raw/tool_outputs.jsonl
-5. 保存 compact/context.json
-6. 保存 report.md
-7. 支持 debug bundle 打包
+1. workspace 是 SQLite trace 的补充，不替代 TraceStore
+2. SQLite 负责查询；workspace 负责人类可读、调试、归档、打包
+3. 每个 run 一个独立目录，删除一个 run workspace 不影响其它 run
+4. workspace 内容必须来自 ResourceAgentResult / TraceStore / ApprovalStore 等结构化数据
+5. 不在 workspace 里保存 API key、完整 .env、敏感系统信息
+6. P11 只做落盘和查看，不做 replay，不做真实 action execution
 ```
 
-建议目录：
+最终目录目标：
 
 ```text
 var/runs/run_xxx/
+  metadata.json
+  plan.json
+  todos.json
+  report.md
   raw/
     tool_outputs.jsonl
   compact/
-    context.json
-  artifacts/
-    report.md
-  tasks/
-    todos.jsonl
-  plan.json
-  metadata.json
+    report_context.json
+  trace/
+    steps.json
+    evidence.json
+    findings.json
+    approvals.json
+```
+
+文件职责：
+
+```text
+metadata.json
+  本次 run 的顶层元数据：
+  run_id、incident_id、user_input、resource_type、agent_mode、planner_mode、
+  report_mode、status、started_at、ended_at、summary。
+
+plan.json
+  本次使用的 ToolPlan：
+  plan_id、planner_mode、resource_type、steps、budget、fallback_plan、
+  tool_catalog_version。
+
+todos.json
+  最终 phase/task todo 状态：
+  Planning tools、Tool execution、Report、Approval、Action execution，
+  以及工具任务和审批任务的最终状态。
+
+report.md
+  最终诊断报告。template report 或 LLM report 都写这里。
+
+raw/tool_outputs.jsonl
+  每行一个 ToolExecutionResult：
+  tool_name、permission_level、status、validated_args、data、preview、summary、
+  error、latency_ms。
+
+compact/report_context.json
+  给 LLM report 使用的受控上下文。
+  只有 report_context 存在时才写；template-only run 可以跳过或写 null metadata。
+
+trace/steps.json
+  DiagnosisStep 列表，保留 Agent 执行路径和 observation_preview。
+
+trace/evidence.json
+  EvidenceItem 列表，保留 detector 提取的证据。
+
+trace/findings.json
+  DiagnosisFinding 列表，保留诊断结论和 recommended_actions。
+
+trace/approvals.json
+  Approval 快照，保留危险操作审批状态。
+```
+
+为什么 P11 要拆小阶段：
+
+```text
+workspace 会影响 CLI、TraceStore、approval sync、未来 action executor。
+如果一次性做完整 debug bundle / replay / action artifacts，容易把边界做乱。
+所以 P11 只做“稳定落盘 + 可查看 + 可打包”的最小闭环。
+```
+
+#### V1-P11.1：Workspace Writer 基础落盘
+
+目标：
+
+```text
+诊断完成后，把 ResourceAgentResult 的核心内容写入 var/runs/<run_id>/。
+```
+
+新增模块：
+
+```text
+workspace/
+  __init__.py
+  writer.py
+```
+
+核心接口：
+
+```python
+class WorkspaceWriter:
+    def write_agent_result(self, result: ResourceAgentResult) -> Path:
+        ...
+```
+
+P11.1 落盘内容：
+
+```text
+metadata.json
+plan.json
+todos.json
+report.md
+raw/tool_outputs.jsonl
+trace/steps.json
+trace/evidence.json
+trace/findings.json
+trace/approvals.json
+```
+
+接入点：
+
+```text
+CLI diagnose:
+  trace_store.save_agent_result(result)
+  workspace_writer.write_agent_result(result)
+
+API diagnose:
+  trace_store.save_agent_result(result)
+  workspace_writer.write_agent_result(result)
+```
+
+注意：
+
+```text
+1. P11.1 不要求 report_context.json，因为它只在 llm_report 模式稳定存在
+2. 写文件要使用结构化 model_dump(mode="json")
+3. JSON 文件使用 ensure_ascii=False + indent=2，方便人看
+4. JSONL 用一行一个 tool result，方便后续追加和 grep
+5. 写入失败不能让诊断主流程崩掉，至少要返回可读错误或记录 warning
 ```
 
 完成标准：
 
+```bash
+python main.py diagnose "为什么 CPU 很高？" --resource-type cpu
+ls var/runs/<run_id>/
+```
+
+应该看到：
+
 ```text
-1. 每次 run 的关键产物都能在独立 workspace 中找到
-2. 删除某个 run workspace 不影响其他 run
-3. 可以根据 workspace 辅助 replay / debug
+metadata.json
+plan.json
+todos.json
+report.md
+raw/tool_outputs.jsonl
+trace/steps.json
+trace/evidence.json
+trace/findings.json
+trace/approvals.json
+```
+
+#### V1-P11.2：Compact Context / LLM Report 上下文落盘
+
+目标：
+
+```text
+把 LLM report 真正看到的 report_context 保存下来，方便定位 LLM 报告质量问题。
+```
+
+背景：
+
+```text
+P7.5 解决了“LLM 上下文太 compact，看不到 top process 明细”的问题。
+P11.2 要把这个上下文持久化到 workspace，方便回答：
+  LLM 到底看到了哪些 tool details？
+  LLM 是基于什么 evidence / findings 写报告的？
+```
+
+落盘内容：
+
+```text
+compact/report_context.json
+```
+
+数据来源：
+
+```text
+优先从 DiagnosisStep(action="build_report_context").observation 获取。
+如果没有该 step：
+  - template report 模式：可以不生成 compact/report_context.json
+  - 或写 compact/report_context.json 为 {"available": false, "reason": "report_mode=template"}
+```
+
+完成标准：
+
+```bash
+python main.py diagnose "为什么 CPU 很高？" --report-mode llm
+cat var/runs/<run_id>/compact/report_context.json
+```
+
+应该能看到：
+
+```text
+context_version
+resource_type
+tool_summaries
+selected_details
+evidence_items
+findings
+approvals
+```
+
+#### V1-P11.3：CLI Workspace 查看命令
+
+目标：
+
+```text
+用户不需要手动 ls 目录，也能通过 CLI 找到一次 run 的 workspace。
+```
+
+新增命令：
+
+```bash
+python main.py workspace <run_id>
+```
+
+输出：
+
+```text
+workspace=var/runs/run_xxx
+metadata.json
+plan.json
+todos.json
+report.md
+raw/tool_outputs.jsonl
+compact/report_context.json
+trace/steps.json
+trace/evidence.json
+trace/findings.json
+trace/approvals.json
+```
+
+可选参数：
+
+```bash
+python main.py workspace <run_id> --json
+python main.py workspace <run_id> --show-report
+python main.py workspace <run_id> --show-context
+```
+
+行为：
+
+```text
+--json:
+  输出 workspace 文件清单和路径，方便脚本使用
+
+--show-report:
+  直接打印 report.md 内容
+
+--show-context:
+  直接打印 compact/report_context.json，方便检查 LLM report 实际看到的上下文
+```
+
+完成标准：
+
+```bash
+python main.py workspace <run_id>
+python main.py workspace <run_id> --show-report
+python main.py workspace <run_id> --show-context
+```
+
+#### V1-P11.4：Approval Sync 后更新 workspace
+
+目标：
+
+```text
+approve / reject / interactive approval 改变审批状态后，workspace 里的 approvals 和 todos 也要更新。
+```
+
+为什么需要：
+
+```text
+P10.8 后，审批不只存在于 approval store 和 SQLite trace；
+workspace 如果不更新，就会出现：
+  trace 里 approval=executed
+  workspace trace/approvals.json 里还是 pending
+这会破坏 debug bundle 的可信度。
+```
+
+接入点：
+
+```text
+approve command:
+  sync_approval_trace(...)
+  workspace_writer.update_from_trace(run_id)
+
+reject command:
+  sync_approval_trace(...)
+  workspace_writer.update_from_trace(run_id)
+
+interactive approval:
+  每次 sync_approval_trace(...) 后
+  workspace_writer.update_from_trace(run_id)
+```
+
+建议接口：
+
+```python
+class WorkspaceWriter:
+    def update_from_trace(self, run_id: str, trace_store: TraceStore) -> Path:
+        ...
+```
+
+更新内容：
+
+```text
+metadata.json          # run.status 可能变化
+todos.json             # approval task 状态变化
+trace/approvals.json   # approval.status 变化
+```
+
+实际约束：
+
+```text
+1. update_from_trace 只同步审批后会变化的文件
+2. 不重写 plan.json / raw/tool_outputs.jsonl / compact/report_context.json
+3. 如果旧 run 没有 workspace，CLI/API approve/reject 不失败，只跳过 workspace sync
+4. workspace_version 随 writer 当前版本写入 metadata.json
+```
+
+完成标准：
+
+```bash
+python main.py diagnose "为什么内存快满了？" --resource-type memory
+python main.py approve <approval_id>
+cat var/runs/<run_id>/trace/approvals.json
+cat var/runs/<run_id>/todos.json
+```
+
+应该看到：
+
+```text
+approval.status=executed
+approval task status=completed
+run.status=completed
+```
+
+#### V1-P11.5：Debug Bundle 打包
+
+目标：
+
+```text
+把一次 run 的 workspace 打包成一个可分享的调试包。
+```
+
+新增命令：
+
+```bash
+python main.py bundle <run_id>
+python main.py bundle <run_id> --json
+```
+
+输出：
+
+```text
+var/bundles/run_xxx.tar.gz
+```
+
+可通过环境变量覆盖 bundle 输出目录：
+
+```bash
+RESOURCEOPS_BUNDLE_ROOT=/tmp/resourceops-bundles python main.py bundle <run_id>
+```
+
+打包内容：
+
+```text
+var/runs/<run_id>/
+```
+
+安全规则：
+
+```text
+1. 不包含 .env
+2. 不包含 API key
+3. 不包含 var/approvals.jsonl 全局文件
+4. 只打包当前 run workspace
+5. 后续如有敏感字段，需要在 writer 层做 redaction
+```
+
+当前实现：
+
+```text
+1. bundle 只添加 var/runs/<run_id>/ 目录
+2. tar 内部路径为 runs/<run_id>/...
+3. tar filter 会排除 .env 和 approvals.jsonl
+4. 找不到 workspace 时返回错误，不创建空包
+```
+
+完成标准：
+
+```bash
+python main.py bundle <run_id>
+tar -tzf var/bundles/run_xxx.tar.gz
+```
+
+能看到 workspace 文件树。
+
+P11 不做：
+
+```text
+1. 不做 replay
+2. 不做从 workspace 恢复 run
+3. 不做真实危险动作执行
+4. 不做 action pre-check / post-check
+5. 不做多 Agent workspace 合并
+6. 不做长期归档清理策略
+```
+
+P11 总完成标准：
+
+```text
+1. 每次 diagnose 都产生独立 workspace
+2. workspace 中能看到 metadata、plan、todos、report、tool outputs、steps、evidence、findings、approvals
+3. llm_report run 能看到 compact/report_context.json
+4. approve / reject 后 workspace 审批状态同步更新
+5. CLI 可以查看 workspace 和 report
+6. 可以把 workspace 打成 debug bundle
 ```
 
 ### V1-P12：Action Executor dry-run
