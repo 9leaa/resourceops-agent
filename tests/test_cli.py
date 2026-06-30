@@ -169,6 +169,38 @@ def test_interactive_approval_reject_syncs_trace(monkeypatch, tmp_path, capsys) 
     assert approval_task["status"] == "skipped"
 
 
+def test_interactive_approval_real_choice_records_blocked_real_result(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.delenv("RESOURCEOPS_ENABLE_REAL_ACTIONS", raising=False)
+    monkeypatch.delenv("RESOURCEOPS_REAL_ACTION_ALLOWLIST", raising=False)
+    result, trace_store, approval_store = build_memory_approval_run(tmp_path)
+    approval_id = result.approvals[0]["approval_id"]
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "r")
+    run_interactive_approvals(
+        result.run.run_id,
+        result.approvals,
+        trace_store=trace_store,
+        approval_store=approval_store,
+    )
+
+    captured = capsys.readouterr()
+    trace = trace_store.get_trace(result.run.run_id)
+    action_results = trace["action_results"]
+    action_task = [
+        todo for todo in trace["todos"]
+        if todo.get("source") == "action_executor" and todo.get("approval_id") == approval_id
+    ][0]
+
+    assert "已批准并完成 dry-run" in captured.out
+    assert "真实执行结果：blocked" in captured.out
+    assert trace["run"]["status"] == "failed"
+    assert trace["approvals"][0]["status"] == "executed"
+    assert [item["mode"] for item in action_results] == ["dry_run", "real"]
+    assert action_results[-1]["status"] == "blocked"
+    assert "real execution is disabled" in action_results[-1]["error"]
+    assert action_task["status"] == "failed"
+
+
 def test_interactive_approval_refreshes_todo_sink_after_reject(monkeypatch, tmp_path) -> None:
     class FakeTodoSink:
         def __init__(self) -> None:
@@ -181,7 +213,7 @@ def test_interactive_approval_refreshes_todo_sink_after_reject(monkeypatch, tmp_
     approval_id = result.approvals[0]["approval_id"]
     sink = FakeTodoSink()
 
-    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "reject")
     run_interactive_approvals(
         result.run.run_id,
         result.approvals,
@@ -264,7 +296,7 @@ def test_approval_prompt_pauses_live_without_printing_task_panel(monkeypatch) ->
             self.resume_calls += 1
 
     sink = FakeTodoSink()
-    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "r")
 
     choice = ask_approval_choice(
         1,
@@ -279,7 +311,7 @@ def test_approval_prompt_pauses_live_without_printing_task_panel(monkeypatch) ->
         event_sink=sink,
     )
 
-    assert choice == "n"
+    assert choice == "r"
     assert sink.pause_calls == [False]
     assert sink.resume_calls == 1
 

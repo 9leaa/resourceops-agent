@@ -252,7 +252,34 @@ def run_interactive_approvals(
                     )
                 break
 
-            if choice in {"n", "no", "r", "reject"}:
+            if choice in {"r", "real", "execute-real"}:
+                try:
+                    approved, tool_result, action_result = approval_service.approve_with_action_result(approval_id)
+                    sync_approval_trace(trace_store, approval_store, approved, action_result)
+                    sync_workspace_from_trace(run_id, trace_store)
+
+                    real_approval, real_tool_result, real_action_result = approval_service.execute_real_approved_action(
+                        approval_id,
+                        confirm_real=True,
+                    )
+                except (KeyError, ValueError) as error:
+                    decisions.append(("error", approval_id))
+                    print_interactive_lines(event_sink, f"真实执行处理失败：{approval_id} error={error}")
+                else:
+                    sync_approval_trace(trace_store, approval_store, real_approval, real_action_result)
+                    sync_workspace_from_trace(run_id, trace_store)
+                    refresh_todo_sink_from_trace(event_sink, run_id, trace_store)
+                    decisions.append(("real", approval_id))
+                    print_interactive_lines(
+                        event_sink,
+                        f"已批准并完成 dry-run：{approved.action} {approved.args}",
+                        f"dry_run={action_result.status} preview={action_result.preview}",
+                        f"真实执行结果：{real_action_result.status} mode={real_action_result.mode} preview={real_action_result.preview}",
+                        f"tool_result={real_tool_result.status} preview={real_tool_result.preview}",
+                    )
+                break
+
+            if choice in {"n", "no", "reject"}:
                 try:
                     rejected = approval_service.reject(approval_id)
                 except (KeyError, ValueError) as error:
@@ -400,7 +427,8 @@ def ask_approval_choice(
         while True:
             console.print(
                 "[bold yellow]选择：[/]"
-                "[green]y=批准[/] / "
+                "[green]y=批准dry-run[/] / "
+                "[bold red]r=批准并真实执行[/] / "
                 "[red]n=拒绝[/] / "
                 "[cyan]s=跳过[/] / "
                 "[dim]q=退出[/] > ",
@@ -412,9 +440,11 @@ def ask_approval_choice(
                 "yes",
                 "a",
                 "approve",
+                "r",
+                "real",
+                "execute-real",
                 "n",
                 "no",
-                "r",
                 "reject",
                 "s",
                 "skip",
@@ -424,7 +454,7 @@ def ask_approval_choice(
                 "exit",
             }:
                 return choice
-            print("输入无效，请输入 y / n / s / q。")
+            print("输入无效，请输入 y / r / n / s / q。")
     finally:
         resume_event_sink(event_sink)
 
@@ -520,6 +550,8 @@ def approval_status_style(status: object) -> str:
 def decision_style(decision: str) -> str:
     if decision == "approved":
         return "green"
+    if decision == "real":
+        return "bold red"
     if decision == "rejected":
         return "red"
     if decision in {"skipped", "quit"}:
