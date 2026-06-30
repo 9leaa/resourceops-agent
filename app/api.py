@@ -31,6 +31,10 @@ class DiagnoseRequest(StrictBaseModel):
     planner_mode: str | None = Field(default=None, pattern="^(deterministic|llm)$")
     report_mode: str | None = Field(default=None, pattern="^(template|llm)$")
 
+
+class ExecuteRealRequest(StrictBaseModel):
+    confirm_real: bool = False
+
 #get接口，访问curl http://localhost:8000/health返回status：ok
 
 @app.get("/health")
@@ -127,15 +131,43 @@ def approve(approval_id: str) -> dict[str, Any]:
     approval_store = build_approval_store()
     service = ApprovalService(store=approval_store)
     try:
-        approval, tool_result = service.approve(approval_id)
+        # P12: HTTP approve 同时返回 approval、兼容 tool_result 和 action_result。
+        approval, tool_result, action_result = service.approve_with_action_result(approval_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    sync_approval_trace(trace_store, approval_store, approval)
+    sync_approval_trace(trace_store, approval_store, approval, action_result)
     sync_workspace_from_trace(approval.run_id, trace_store)
-    return {"approval": approval.model_dump(mode="json"), "tool_result": tool_result.model_dump(mode="json")}
+    return {
+        "approval": approval.model_dump(mode="json"),
+        "tool_result": tool_result.model_dump(mode="json"),
+        "action_result": action_result.model_dump(mode="json"),
+    }
 
+
+@app.post("/approvals/{approval_id}/execute-real")
+def execute_real(approval_id: str, request: ExecuteRealRequest) -> dict[str, Any]:
+    trace_store = build_trace_store()
+    approval_store = build_approval_store()
+    service = ApprovalService(store=approval_store)
+    try:
+        approval, tool_result, action_result = service.execute_real_approved_action(
+            approval_id,
+            confirm_real=request.confirm_real,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sync_approval_trace(trace_store, approval_store, approval, action_result)
+    sync_workspace_from_trace(approval.run_id, trace_store)
+    return {
+        "approval": approval.model_dump(mode="json"),
+        "tool_result": tool_result.model_dump(mode="json"),
+        "action_result": action_result.model_dump(mode="json"),
+    }
 #拒绝
 @app.post("/approvals/{approval_id}/reject")
 def reject(approval_id: str) -> dict[str, Any]:

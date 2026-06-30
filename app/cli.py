@@ -103,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_parser.add_argument("run_id")
     bundle_parser.add_argument("--json", action="store_true")
 
+    execute_real_parser = subparsers.add_parser("execute-real", help="Execute an approved action for real.")
+    execute_real_parser.add_argument("approval_id")
+    execute_real_parser.add_argument("--confirm-real", action="store_true")
+    execute_real_parser.add_argument("--json", action="store_true")
+
     return parser
 
 def write_workspace_result(result) -> None:
@@ -174,6 +179,26 @@ def handle_diagnose(args: argparse.Namespace) -> int:
                     event_sink.close()
     return 0
 
+def handle_execute_real(args: argparse.Namespace) -> int:
+    trace_store = TraceStore()
+    approval_store = ApprovalStore()
+    approval, tool_result, action_result = ApprovalService(store=approval_store).execute_real_approved_action(
+        args.approval_id,
+        confirm_real=args.confirm_real,
+    )
+    sync_approval_trace(trace_store, approval_store, approval, action_result)
+    sync_workspace_from_trace(approval.run_id, trace_store)
+
+    payload = {
+        "approval": approval.model_dump(mode="json"),
+        "tool_result": tool_result.model_dump(mode="json"),
+        "action_result": action_result.model_dump(mode="json"),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"真实执行结果：{action_result.status} mode={action_result.mode} preview={action_result.preview}")
+    return 0
 
 def run_interactive_approvals(
     run_id: str,
@@ -210,12 +235,12 @@ def run_interactive_approvals(
             choice = ask_approval_choice(index, len(pending), approval, event_sink)
             if choice in {"y", "yes", "a", "approve"}:
                 try:
-                    approved, tool_result = approval_service.approve(approval_id)
+                    approved, tool_result, action_result = approval_service.approve_with_action_result(approval_id)
                 except (KeyError, ValueError) as error:
                     decisions.append(("error", approval_id))
                     print_interactive_lines(event_sink, f"审批处理失败：{approval_id} error={error}")
                 else:
-                    sync_approval_trace(trace_store, approval_store, approved)
+                    sync_approval_trace(trace_store, approval_store, approved, action_result)
                     sync_workspace_from_trace(run_id, trace_store)
                     refresh_todo_sink_from_trace(event_sink, run_id, trace_store)
                     decisions.append(("approved", approval_id))
@@ -223,6 +248,7 @@ def run_interactive_approvals(
                         event_sink,
                         f"已批准并模拟执行：{approved.action} {approved.args}",
                         f"tool_result={tool_result.status} preview={tool_result.preview}",
+                        f"action_result={action_result.status} mode={action_result.mode} preview={action_result.preview}",
                     )
                 break
 
@@ -993,6 +1019,18 @@ def handle_trace(args: argparse.Namespace) -> int:
                 )
         else:
             print("- none")
+        print("\naction_results:")
+        action_results = trace.get("action_results") or []
+        if action_results:
+            for result in action_results:
+                print(
+                    f"- {result['action']} status={result['status']} "
+                    f"mode={result['mode']} approval_id={result['approval_id']} "
+                    f"preview={result['preview']}"
+                )
+        else:
+            print("- none")
+        
     return 0
 
 
@@ -1011,14 +1049,20 @@ def handle_approvals(args: argparse.Namespace) -> int:
 def handle_approve(args: argparse.Namespace) -> int:
     trace_store = TraceStore()
     approval_store = ApprovalStore()
-    approval, tool_result = ApprovalService(store=approval_store).approve(args.approval_id)
-    sync_approval_trace(trace_store, approval_store, approval)
+    # P12: approve 会返回 action_result；tool_result 只作为旧接口兼容输出。
+    approval, tool_result, action_result = ApprovalService(store=approval_store).approve_with_action_result(args.approval_id)
+    sync_approval_trace(trace_store, approval_store, approval, action_result)
     sync_workspace_from_trace(approval.run_id, trace_store)
-    payload = {"approval": approval.model_dump(mode="json"), "tool_result": tool_result.model_dump(mode="json")}
+    payload = {
+        "approval": approval.model_dump(mode="json"),
+        "tool_result": tool_result.model_dump(mode="json"),
+        "action_result": action_result.model_dump(mode="json"),
+    }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"已批准并模拟执行：{approval.action} {approval.args}")
+        print(f"action_result={action_result.status} mode={action_result.mode} preview={action_result.preview}")
     return 0
 
 
@@ -1054,6 +1098,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return handle_workspace(args)
     if args.command == "bundle":
         return handle_bundle(args)
+    if args.command == "execute-real":
+        return handle_execute_real(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

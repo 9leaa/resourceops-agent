@@ -8,9 +8,9 @@ The long-form design is currently maintained at:
 
 This project implements that design as a separate ResourceOps codebase.
 
-Current implementation stage: **V1-P10.8 Interactive Approval**.
+Current implementation stage: **V1-P13 complete**.
 
-Implemented through V1-P10.8:
+Implemented through V1-P13:
 
 - V1-P0: project rename and schema adjustment.
 - V1-P1: real local GPU / CPU / Memory / Process tools.
@@ -29,8 +29,13 @@ Implemented through V1-P10.8:
 - V1-P10.6: Rich Live CLI 面板。非 JSON 诊断模式下用刷新式终端面板展示大任务和保留式任务详情。
 - V1-P10.7: Approval / Action execution 阶段展示和 trace 同步。审批 task 会随 approve/reject 更新状态。
 - V1-P10.8: Interactive Approval。CLI diagnose 可选 `--interactive-approval`，支持 y/n/s/q 逐个处理 pending approvals。
+- V1-P11: Workspace Isolation 增强。保存 plan、todos、raw、compact、report、trace artifacts 和 debug bundle。
+- V1-P12: Action Executor dry-run。approve 后生成 `ActionResult(mode=dry_run)` 并同步 trace/todo/workspace/CLI/API。
+- V1-P13.1/P13.2: Gated real action execution。`kill_process` real execution 只通过 `execute-real` 开放，默认关闭，要求 allowlist、approval、dry-run、pre-check、post-check 和确认。
+- V1-P13.3: `renice_process` write-level real action。支持 pid/nice 参数校验、dry-run、real execution、pre-check/post-check、trace/workspace 复用。
+- V1-P13.4: `inspect_process` safe read-only action surface。复用 ActionExecutor action schema，不需要 approval/env/allowlist，不改变系统状态。
 
-Next stage: **V1-P11 Workspace Isolation 增强**.
+Next stage: **V2-P1 Hooks and Error Recovery**.
 
 V1 后续路线：
 
@@ -45,8 +50,8 @@ V1 后续路线：
   - P11.3：CLI workspace 查看命令，支持 `workspace <run_id>`、`--json`、`--show-report`、`--show-context`。
   - P11.4：审批后同步 workspace，approve/reject/interactive approval 后更新 approvals、todos、metadata。
   - P11.5：Debug Bundle 打包，生成 `var/bundles/<run_id>.tar.gz`，支持 `bundle <run_id>` 和 `--json`。
-- V1-P12：Action Executor dry-run，定义可审批动作执行器，但只模拟执行和记录 pre-check / post-check。
-- V1-P13：真实安全动作执行，只开放白名单动作，必须 approval、pre-check、dry-run、post-check 全部通过。
+- V1-P12：Action Executor dry-run，P12.1/P12.2 已完成。approve 后调用 ActionExecutor dry-run，生成 ActionResult，并同步 trace、todo、workspace、CLI/API。
+- V1-P13：真实安全动作执行已完成。首批 action surface 为 `inspect_process` safe read-only、`renice_process` write-level gated real action、`kill_process` dangerous gated real action。
 
 V2 路线：
 

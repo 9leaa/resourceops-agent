@@ -162,6 +162,23 @@ class TraceStore:
                     FOREIGN KEY(run_id) REFERENCES diagnosis_runs(run_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS action_results (
+                    action_result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    approval_id TEXT,
+                    action TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    pre_check_json TEXT NOT NULL,
+                    execution_json TEXT NOT NULL,
+                    post_check_json TEXT NOT NULL,
+                    preview TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES diagnosis_runs(run_id)
+                );
+
                 """
             )
             self._ensure_column(
@@ -501,6 +518,10 @@ class TraceStore:
                 """,
                 (run_id,),
             ).fetchall()
+            action_results = connection.execute(
+                "SELECT * FROM action_results WHERE run_id = ? ORDER BY action_result_id",
+                (run_id,),
+            ).fetchall()
 
         return {
             "run": dict(run),
@@ -510,6 +531,7 @@ class TraceStore:
             "findings": [self._finding_to_dict(row) for row in findings],
             "approvals": [self._approval_to_dict(row) for row in approvals],
             "todos": [self._todo_to_dict(row) for row in todos],
+            "action_results": [self._action_result_to_dict(row) for row in action_results],
         }
     def list_todos(self, run_id: str) -> list[DiagnosisTodo]:
         with self.connect() as connection:
@@ -596,6 +618,125 @@ class TraceStore:
 
             self.save_todo(todo)
     
+    def save_action_result(self, run_id: str, result: Any) -> None:
+        """保存 P12 ActionExecutor 产生的 dry-run 结果。"""
+
+        payload = result.model_dump(mode="json")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO action_results (
+                    run_id, approval_id, action, mode, status, args_json,
+                    pre_check_json, execution_json, post_check_json,
+                    preview, error, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    payload["approval_id"],
+                    payload["action"],
+                    payload["mode"],
+                    payload["status"],
+                    dumps(payload["args"]),
+                    dumps(payload["pre_check"]),
+                    dumps(payload["execution"]),
+                    dumps(payload["post_check"]),
+                    payload["preview"],
+                    payload["error"],
+                    payload["created_at"],
+                ),
+            )
+
+    def sync_action_todos(self, run_id: str, action_result: Any) -> None:
+        """根据 ActionResult 更新 Action execution 阶段和小任务。
+
+        Approval task 表示“人是否批准”；Action task 表示“批准后的动作 dry-run
+        是否完成”。这两个状态需要分开，避免把审批完成误解成动作完成。
+        """
+
+        todos = self.list_todos(run_id)
+        if not todos:
+            return
+
+        action_phase = next(
+            (
+                todo for todo in todos
+                if str(todo.level) == TodoLevel.PHASE.value
+                and str(todo.display_group) == TodoDisplayGroup.ACTIONS.value
+            ),
+            None,
+        )
+        if action_phase is None:
+            return
+
+        success = str(action_result.status) == "success"
+        phase_status = TodoStatus.COMPLETED if success else TodoStatus.FAILED
+        action_status = TodoStatus.COMPLETED if success else TodoStatus.FAILED
+
+        action_phase = action_phase.model_copy(
+            update={
+                "status": phase_status,
+                "result_preview": action_result.preview,
+                "error": action_result.error,
+                "updated_at": utc_now(),
+                }
+        )
+        self.save_todo(action_phase)
+
+        existing = next(
+            (
+                todo for todo in todos
+                if todo.source == "action_executor"
+                and todo.approval_id == action_result.approval_id
+                and todo.tool_name == action_result.action
+            ),
+            None,
+        )
+
+        if existing is None:
+            # 诊断阶段只预留 Action execution phase；真正的 action task 在
+            # approve 后根据 ActionResult 创建。
+            max_index = max((todo.todo_index for todo in todos), default=0)
+            max_action_order = max(
+                (
+                    todo.sort_order for todo in todos
+                    if str(todo.display_group) == TodoDisplayGroup.ACTIONS.value
+                ),
+                default=0,
+            )
+            existing = DiagnosisTodo(
+                run_id=run_id,
+                todo_index=max_index + 1,
+                sort_order=max_action_order + 1,
+                title=f"Action: {action_result.action}",
+                status=action_status,
+                level=TodoLevel.TASK,
+                parent_todo_id=action_phase.todo_id,
+                display_group=TodoDisplayGroup.ACTIONS,
+                source="action_executor",
+                tool_name=action_result.action,
+                args=action_result.args,
+                approval_id=action_result.approval_id,
+                assigned_agent="action_executor",
+                result_preview=action_result.preview,
+                error=action_result.error,
+            )
+        else:
+            existing = existing.model_copy(
+                update={
+                    "status": action_status,
+                    "result_preview": action_result.preview,
+                    "error": action_result.error,
+                    "updated_at": utc_now(),
+                }
+            )
+
+        self.save_todo(existing)
+
+
+
+
 
     @staticmethod
     def _step_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -629,4 +770,13 @@ class TraceStore:
     def _approval_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["args"] = loads(data.pop("args_json"))
+        return data
+
+    @staticmethod
+    def _action_result_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["args"] = loads(data.pop("args_json"))
+        data["pre_check"] = loads(data.pop("pre_check_json"))
+        data["execution"] = loads(data.pop("execution_json"))
+        data["post_check"] = loads(data.pop("post_check_json"))
         return data

@@ -58,6 +58,7 @@ class WorkspaceWriter:
         self._write_json(run_dir / "trace" / "evidence.json", [self._jsonable(item) for item in result.evidence_items])
         self._write_json(run_dir / "trace" / "findings.json", [self._jsonable(item) for item in result.findings])
         self._write_json(run_dir / "trace" / "approvals.json", [self._jsonable(item) for item in result.approvals])
+        self._write_json(run_dir / "trace" / "action_results.json", [])
 
         return run_dir
 
@@ -70,6 +71,8 @@ class WorkspaceWriter:
         self._write_json(run_dir / "metadata.json", self._metadata_from_trace(trace, run_dir))
         self._write_json(run_dir / "todos.json", trace.get("todos") or [])
         self._write_json(run_dir / "trace" / "approvals.json", trace.get("approvals") or [])
+        # P12 approve 后会新增 action_result 和 action todo，这里跟随 trace 刷新。
+        self._write_json(run_dir / "trace" / "action_results.json", trace.get("action_results") or [])
         return run_dir
 
     def create_bundle(
@@ -104,6 +107,7 @@ class WorkspaceWriter:
                     "findings": len(result.findings),
                     "approvals": len(result.approvals),
                     "todos": len(result.todos),
+                    "action_results": 0,
                 },
             }
         )
@@ -132,6 +136,7 @@ class WorkspaceWriter:
                     "findings": len(trace.get("findings") or []),
                     "approvals": len(trace.get("approvals") or []),
                     "todos": len(trace.get("todos") or []),
+                    "action_results": len(trace.get("action_results") or [])
                 },
             }
         )

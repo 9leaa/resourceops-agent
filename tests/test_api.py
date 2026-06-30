@@ -33,6 +33,8 @@ def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RESOURCEOPS_TRACE_DB", str(tmp_path / "resourceops.sqlite3"))
     monkeypatch.setenv("RESOURCEOPS_APPROVAL_STORE", str(tmp_path / "approvals.jsonl"))
     monkeypatch.setenv("RESOURCEOPS_WORKSPACE_ROOT", str(tmp_path / "runs"))
+    monkeypatch.delenv("RESOURCEOPS_ENABLE_REAL_ACTIONS", raising=False)
+    monkeypatch.delenv("RESOURCEOPS_REAL_ACTION_ALLOWLIST", raising=False)
 
     def build_fixture_agent(
         approval_service: ApprovalService,
@@ -82,6 +84,8 @@ def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
     approved = approve_response.json()
     assert approved["approval"]["status"] == "executed"
     assert approved["tool_result"]["data"]["simulated"] is True
+    assert approved["action_result"]["mode"] == "dry_run"
+    assert approved["action_result"]["status"] == "success"
 
     updated_trace_response = client.get(f"/runs/{run_id}")
     assert updated_trace_response.status_code == 200
@@ -99,3 +103,26 @@ def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
 
     assert workspace_approvals[0]["status"] == "executed"
     assert approval_task["status"] == "completed"
+
+    execute_real_response = client.post(
+        f"/approvals/{approval_id}/execute-real",
+        json={"confirm_real": True},
+    )
+    assert execute_real_response.status_code == 200
+    execute_real = execute_real_response.json()
+    assert execute_real["action_result"]["mode"] == "real"
+    assert execute_real["action_result"]["status"] == "blocked"
+    assert "real execution is disabled" in execute_real["action_result"]["error"]
+    assert execute_real["tool_result"]["data"]["simulated"] is False
+
+    final_trace_response = client.get(f"/runs/{run_id}")
+    assert final_trace_response.status_code == 200
+    final_trace = final_trace_response.json()
+    assert [result["mode"] for result in final_trace["action_results"]] == ["dry_run", "real"]
+    assert final_trace["action_results"][-1]["status"] == "blocked"
+
+    workspace_action_results = json.loads(
+        (tmp_path / "runs" / run_id / "trace" / "action_results.json").read_text(encoding="utf-8")
+    )
+    assert [result["mode"] for result in workspace_action_results] == ["dry_run", "real"]
+    assert workspace_action_results[-1]["status"] == "blocked"

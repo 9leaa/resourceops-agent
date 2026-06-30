@@ -1,6 +1,6 @@
 # Stage Pause Summary
 
-Current stage: **V1-P10.8**
+Current stage: **V1-P13 complete**
 
 ## Implemented
 
@@ -15,7 +15,7 @@ Current stage: **V1-P10.8**
 - Fixture eval with deterministic tool-output fixtures.
 - Live smoke eval against the current machine.
 - Bounded CPU / Memory / GPU stress scripts.
-- Complete FastAPI demo flow for diagnose, runs, trace, approvals, approve, and reject.
+- Complete FastAPI demo flow for diagnose, runs, trace, approvals, approve, reject, and execute-real.
 - Approval decisions made through HTTP are synchronized back to SQLite trace.
 - Approval decisions made through CLI are synchronized back to SQLite trace.
 - Dockerfile and Docker Compose local HTTP startup.
@@ -45,20 +45,26 @@ Current stage: **V1-P10.8**
 - Approval tasks are synchronized after approve/reject, including approval phase and run status.
 - `--interactive-approval` lets CLI users handle pending approvals in the same terminal with y/n/s/q decisions.
 - Interactive approval pauses Rich Live while reading input, uses colored prompts, then refreshes the final todo panel.
+- P13 real action execution is available only through explicit `execute-real` entrypoints and remains disabled by default.
+- `kill_process` real execution requires `RESOURCEOPS_ENABLE_REAL_ACTIONS=true`, allowlist, approved action, successful dry-run, pre-check, post-check, and explicit confirmation.
+- `renice_process` is now supported as a write-level real action with pid/nice validation, dry-run, pre-check, post-check, and the same explicit execute-real boundary.
+- `inspect_process` is now supported as a safe read-only action surface without approval, env enablement, allowlist, or system-state change.
+- HTTP `POST /approvals/{approval_id}/execute-real` records real-mode `ActionResult` into trace/workspace.
+- P13 tests include mocked process execution and a live smoke test that terminates only a child process created by the test.
 
 ## Verified
 
 ```bash
-python -m compileall -q app agent approval trace tools scripts eval tests
+python -m compileall -q actions app agent approval trace tools scripts eval tests workspace
 conda run -n zcj_hello python -m pytest -q
 ```
 
-Latest local result after P10.8: `79 passed`; fixture eval previously passed at `4/4`; live smoke previously passed.
+Latest local result after P13.4: targeted P13/API/CLI suite passed at `40 passed`; full suite pending in the current run if not listed below.
 
 ## Current Boundary
 
-V1-P10.8 creates approval records for dangerous recommendations and supports complete HTTP, CLI command, and interactive CLI approval trace synchronization.
-It still does not execute real dangerous actions; approve only simulates execution.
+V1-P13.2 creates approval records for dangerous recommendations and supports complete HTTP, CLI command, interactive approval, dry-run action execution, and gated real action execution trace synchronization.
+`approve` still only performs dry-run. Real execution requires explicit `execute-real`, env enablement, allowlist, approval, dry-run, pre-check, post-check, and confirmation.
 LLM planner can choose safe diagnostic tools only after validation.
 LLM still cannot call tools directly, create findings, bypass approval, or change run status.
 LLM report mode remains separate and only rewrites the final report.
@@ -66,11 +72,11 @@ Todo state is a UI/trace layer and does not change detector or tool execution se
 
 ## Next Stages
 
-Next: **V1-P11 Workspace Isolation 增强**。
+Next: **V2-P1 Hooks and Error Recovery**。
 
-- V1-P11：Workspace Isolation 增强，保存 plan、todos、raw tool outputs、compact context 和 report。
-- V1-P12：Action Executor dry-run，定义动作执行器边界，但只模拟执行和记录检查结果。
-- V1-P13：真实安全动作执行，只允许白名单动作，必须 approval、pre-check、dry-run、post-check 全部通过。
+- V1-P11：Workspace Isolation 增强已完成，保存 plan、todos、raw tool outputs、compact context、report 和 debug bundle。
+- V1-P12：Action Executor dry-run 已完成。approve 后生成 ActionResult(mode=dry_run)，并同步 trace、todo、workspace、CLI/API。
+- V1-P13：真实安全动作执行已完成。首批 action surface 为 `inspect_process` safe read-only、`renice_process` write-level gated real action、`kill_process` dangerous gated real action。
 
 V2 方向：
 

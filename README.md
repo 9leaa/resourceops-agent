@@ -2,7 +2,7 @@
 
 ResourceOps Agent is a local-first resource diagnosis agent for GPU, CPU, and Memory problems. It is based on the IncidentOps harness shape, but the product scope is real local resource diagnosis rather than simulated service incidents.
 
-Current status: **V1-P10.8**.
+Current status: **V1-P13 complete**.
 
 ## What Works Now
 
@@ -28,14 +28,16 @@ Current status: **V1-P10.8**.
 - Fixture eval with deterministic tool-output fixtures.
 - Live smoke eval against the current machine.
 - Bounded CPU / Memory / GPU stress scripts.
-- Complete FastAPI demo flow for diagnose, runs, trace, approvals, approve, and reject.
+- Complete FastAPI demo flow for diagnose, runs, trace, approvals, approve, reject, and execute-real.
 - CLI approval and rejection commands synchronize approval/run status back to SQLite trace.
 - CLI trace text output shows approval status.
 - Dockerfile and Docker Compose local HTTP startup.
 - ToolRegistry with permission levels, validation, timeout, preview, and summary fields.
-- Approval store/service with simulated dangerous-action execution.
-- SQLite TraceStore for runs, steps, tool calls, evidence items, findings, and approvals.
+- Approval store/service with ActionExecutor dry-run and gated real execution for approved dangerous actions.
+- SQLite TraceStore for runs, steps, tool calls, evidence items, findings, approvals, todos, and action results.
 - Per-run workspace directories under `var/runs/<run_id>/`.
+- Workspace files include metadata, plan, todos, report, raw tool outputs, compact report context, trace artifacts, approvals, and action results.
+- `workspace <run_id>` inspects a run workspace; `bundle <run_id>` exports a debug bundle.
 - Structured `ResourceAgentResult` shared by Agent, CLI, API, and TraceStore.
 - Optional `llm_report` mode that rewrites only the final report from existing evidence, findings, recommendations, and approvals.
 - Bounded report context builder gives LLM richer but controlled tool details such as top processes, GPU memory, memory/swap metrics, and OOM event previews.
@@ -44,8 +46,12 @@ Current status: **V1-P10.8**.
 - TodoWrite-style task tracking for tool plans, persisted in trace.
 - Rich Live CLI task panel with run phases and retained Tool execution / Approval / Action execution details.
 - Optional interactive approval flow with `--interactive-approval`, including colored approval prompts and y/n/s/q decisions.
+- Approved dangerous recommendations now create `ActionResult(mode=dry_run)` records and update Action execution todos.
+- Gated real action execution is available through `execute-real` and `POST /approvals/{approval_id}/execute-real`; it is disabled by default and requires env enablement, allowlist, approval, dry-run, pre-check, and explicit confirmation.
+- P13.3 adds `renice_process` as a write-level real action, using the same gated executor path as `kill_process` but changing process nice value instead of terminating the process.
+- P13.4 adds `inspect_process` as a safe read-only action surface, completing the first action allowlist: inspect / renice / kill.
 
-V1-P10.8 still does not execute real dangerous actions. Approval only simulates execution after a human approve command or interactive approval.
+`approve` still only runs ActionExecutor dry-run. Real execution is only available through explicit `execute-real` entrypoints and remains disabled unless `RESOURCEOPS_ENABLE_REAL_ACTIONS=true` and the action is allowlisted.
 LLM planner cannot call tools directly; it only proposes a plan that must pass validation.
 
 ## Quick Start
@@ -91,6 +97,20 @@ Show a trace:
 
 ```bash
 python main.py trace <run_id>
+```
+
+Inspect a run workspace:
+
+```bash
+python main.py workspace <run_id>
+python main.py workspace <run_id> --show-context
+```
+
+After approving a dangerous action, inspect the dry-run action result:
+
+```bash
+python main.py trace <run_id> --json | jq '.action_results'
+jq . var/runs/<run_id>/trace/action_results.json
 ```
 
 Run diagnosis and handle pending approvals in the same terminal:
@@ -172,6 +192,11 @@ APPROVAL_ID=$(
 
 curl -sS -X POST http://localhost:18000/approvals/$APPROVAL_ID/approve
 curl -sS http://localhost:18000/runs/$RUN_ID
+
+# Real execution is a separate gated endpoint. By default this returns blocked.
+curl -sS -X POST http://localhost:18000/approvals/$APPROVAL_ID/execute-real \
+  -H 'content-type: application/json' \
+  -d '{"confirm_real":true}'
 ```
 
 ## Project Layout
@@ -191,7 +216,7 @@ resourceops-agent/
 
 ## 后续路线
 
-当前已完成到 **V1-P10.8**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
+当前已完成到 **V1-P13**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
 
 V1-P8 已完成：
 
@@ -219,8 +244,8 @@ V1-P10 / P10.8 已完成：
 ### V1 后续
 
 - V1-P11：Workspace Isolation 增强。把 plan、todos、raw tool outputs、compact context、report 都保存到 `var/runs/<run_id>/`，支持通过 `workspace <run_id>` 查看，并支持 `bundle <run_id>` 导出 debug bundle。
-- V1-P12：Action Executor dry-run。定义 ActionSpec / ActionExecutor / ActionResult，审批通过后仍只模拟执行，并记录 pre-check / post-check。
-- V1-P13：真实安全动作执行。只开放白名单动作，必须通过 approval、参数校验、pre-check、dry-run 和 post-check。
+- V1-P12：Action Executor dry-run。P12.1 / P12.2 已完成：approve 后生成 `ActionResult(mode=dry_run)`，并进入 trace、todo、workspace、CLI/API。
+- V1-P13：真实安全动作执行已完成。`inspect_process` 作为 safe read-only action surface；`renice_process` 作为 write-level gated real action；`kill_process` 作为 dangerous gated real action。write/dangerous 动作复用 execute-real、allowlist、approval、dry-run、pre-check、post-check 和二次确认边界。
 
 ### V2 方向
 
@@ -232,3 +257,8 @@ V1-P10 / P10.8 已完成：
 - V2-P6：Background Tasks，支持 60 秒采样、内存增长观察、GPU 利用率趋势分析。
 - V2-P7：Autonomous Resource Monitor Agent，后台发现异常并自动创建诊断任务，但危险动作仍必须审批。
 - V2-P8：Workspace Isolation 完整化和 Debug Bundle，支持 replay、debug bundle 和多 Agent 上下文隔离。
+
+
+
+#### TODO or BUG
+1.在agent/report_context中，要对输入LLM的数据处理，对工具的检测结果的提取都是一一定制的，以后工具多了怎么办？是不是应该在每个工具都先默认1,2个，然后后续学习呢？
