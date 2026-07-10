@@ -22,3 +22,6 @@ var/
 .DS_Store
 .vscode/
 .idea/
+
+# Local planning notes
+resourceops_github_polish_tasks.md

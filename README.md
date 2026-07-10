@@ -1,69 +1,74 @@
 # ResourceOps Agent
 
-ResourceOps Agent is a local-first resource diagnosis agent for GPU, CPU, and Memory problems. It is based on the IncidentOps harness shape, but the product scope is real local resource diagnosis rather than simulated service incidents.
+ResourceOps Agent is a safe local AI infrastructure diagnosis agent for GPU, CPU, memory, OOM, swap, and process bottlenecks.
 
-Current status: **V1-P13 complete**.
+It combines deterministic resource detectors with bounded LLM planning/reporting, approval-gated dry-run actions, trace replay, workspace isolation, and eval fixtures.
 
-## What Works Now
+Traditional tools show metrics. ResourceOps explains likely causes, supporting evidence, and safe next actions.
 
-- Resource-focused schemas:
-  - `ResourceIncident`
-  - `DiagnosisRun`
-  - `DiagnosisStep`
-  - `ToolCall`
-  - `EvidenceItem`
-  - `DiagnosisFinding`
-  - `Recommendation`
-  - `Approval`
-- CLI command renamed to `diagnose`.
-- FastAPI endpoint renamed to `/diagnose`.
-- Real local tools for CPU, memory, GPU, OOM lookup, and process inspection.
-- Deterministic GPU / CPU / Memory / Mixed resource plans.
-- ResourceAgent executes planned tools through ToolRegistry.
-- Detectors convert tool results into `EvidenceItem` and `DiagnosisFinding` records.
-- Reports include resource checks, key evidence, findings, recommendations, and tool errors.
-- Dangerous recommendations create Approval records.
-- Runs with pending approvals enter `waiting_approval` status.
-- Approval records are persisted to `var/approvals.jsonl` and trace.
-- Fixture eval with deterministic tool-output fixtures.
-- Live smoke eval against the current machine.
-- Bounded CPU / Memory / GPU stress scripts.
-- Complete FastAPI demo flow for diagnose, runs, trace, approvals, approve, reject, and execute-real.
-- CLI approval and rejection commands synchronize approval/run status back to SQLite trace.
-- CLI trace text output shows approval status.
-- Dockerfile and Docker Compose local HTTP startup.
-- ToolRegistry with permission levels, validation, timeout, preview, and summary fields.
-- Approval store/service with ActionExecutor dry-run and gated real execution for approved dangerous actions.
-- SQLite TraceStore for runs, steps, tool calls, evidence items, findings, approvals, todos, and action results.
-- Per-run workspace directories under `var/runs/<run_id>/`.
-- Workspace files include metadata, plan, todos, report, raw tool outputs, compact report context, trace artifacts, approvals, and action results.
-- `workspace <run_id>` inspects a run workspace; `bundle <run_id>` exports a debug bundle.
-- Structured `ResourceAgentResult` shared by Agent, CLI, API, and TraceStore.
-- Optional `llm_report` mode that rewrites only the final report from existing evidence, findings, recommendations, and approvals.
-- Bounded report context builder gives LLM richer but controlled tool details such as top processes, GPU memory, memory/swap metrics, and OOM event previews.
-- `ToolCatalog` and structured `ToolPlan` / `PlannedToolCall` for every diagnosis run.
-- Optional `llm_planner` mode where LLM proposes a tool plan, `PlanValidator` checks it, and invalid plans fallback to deterministic planning.
-- TodoWrite-style task tracking for tool plans, persisted in trace.
-- Rich Live CLI task panel with run phases and retained Tool execution / Approval / Action execution details.
-- Optional interactive approval flow with `--interactive-approval`, including colored approval prompts and y/n/s/q decisions.
-- Approved dangerous recommendations now create `ActionResult(mode=dry_run)` records and update Action execution todos.
-- Gated real action execution is available through `execute-real` and `POST /approvals/{approval_id}/execute-real`; it is disabled by default and requires env enablement, allowlist, approval, dry-run, pre-check, and explicit confirmation.
-- P13.3 adds `renice_process` as a write-level real action, using the same gated executor path as `kill_process` but changing process nice value instead of terminating the process.
-- P13.4 adds `inspect_process` as a safe read-only action surface, completing the first action allowlist: inspect / renice / kill.
+![CI](https://github.com/9leaa/resourceops-agent/actions/workflows/ci.yml/badge.svg)
 
-`approve` still only runs ActionExecutor dry-run. Real execution is only available through explicit `execute-real` entrypoints and remains disabled unless `RESOURCEOPS_ENABLE_REAL_ACTIONS=true` and the action is allowlisted.
-LLM planner cannot call tools directly; it only proposes a plan that must pass validation.
+## Why This Project Matters
+
+AI/ML developers often debug training slowdowns, GPU memory pressure, CPU saturation, memory leaks, swap pressure, and suspicious Python/Jupyter processes using scattered tools like `nvidia-smi`, `top`, `ps`, and logs.
+
+ResourceOps turns those raw signals into an evidence-backed diagnosis workflow:
+
+- collect real local resource signals
+- build a validated tool plan
+- extract structured evidence and findings
+- generate a diagnosis report
+- gate risky actions behind approval and dry-run
+- persist trace/workspace artifacts for replay and debugging
+
+## Current Status
+
+MVP complete: safe local resource diagnosis, bounded LLM planning/reporting, approval-gated dry-run actions, trace replay, workspace isolation, CLI, FastAPI, and eval fixtures.
+
+## Core Capabilities
+
+### 1. Evidence-backed resource diagnosis
+
+- Collects real CPU, memory, GPU, OOM, and process signals.
+- Detects GPU memory pressure, CPU saturation, memory pressure, swap pressure, OOM events, and process-level bottlenecks.
+- Generates structured evidence, findings, recommendations, approvals, action results, and final reports.
+
+### 2. Bounded LLM planning and reporting
+
+- LLM can propose a tool plan, but cannot execute tools directly.
+- `PlanValidator` checks tool names, arguments, budgets, duplicates, resource type, and permission levels.
+- Invalid LLM plans fall back to deterministic plans.
+- LLM report mode rewrites only the final report from existing evidence, findings, recommendations, approvals, and compact report context.
+
+### 3. Safe action workflow
+
+- Dangerous recommendations create approval records.
+- Approval runs `ActionExecutor` dry-run by default.
+- Real execution is gated behind environment flags, allowlists, approval, dry-run, pre-check, and explicit confirmation.
+- Every run stores trace, todos, approvals, action results, and workspace artifacts.
 
 ## Quick Start
 
 ```bash
-cd /home/zcj/resourceops-agent
+git clone https://github.com/9leaa/resourceops-agent.git
+cd resourceops-agent
+
+python -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
 python main.py diagnose "为什么 CPU 很高？"
 ```
 
-The command executes a deterministic resource plan, runs detectors, creates approvals for dangerous recommendations, writes a trace to `var/resourceops.sqlite3`, and prints a diagnosis report.
+ResourceOps works on machines without NVIDIA GPUs. GPU tools return structured `no_gpu` / `nvidia-smi unavailable` results instead of crashing.
 
-Run with optional LLM report rewriting:
+### LLM Report Mode
+
+```bash
+python main.py diagnose "为什么 CPU 很高？" --report-mode llm
+```
+
+The legacy combined mode is also supported:
 
 ```bash
 python main.py diagnose "为什么 CPU 很高？" --agent-mode llm_report
@@ -77,43 +82,19 @@ RESOURCEOPS_LLM_API_KEY=replace-with-your-key
 RESOURCEOPS_LLM_MODEL=replace-with-your-model
 ```
 
-In `llm_report` mode, trace includes `build_report_context` and `llm_report` steps. The first records the compact context given to the LLM, and the second records whether LLM generation succeeded or fell back.
+### LLM Planner Mode
 
-Run with LLM tool planning:
+```bash
+python main.py diagnose "训练很慢，帮我看看瓶颈" --planner-mode llm --report-mode llm
+```
+
+The legacy combined mode is also supported:
 
 ```bash
 python main.py diagnose "训练很慢，帮我看看瓶颈" --agent-mode llm_planner
 ```
 
-In `llm_planner` mode, trace includes an `llm_planner` step. It records whether the LLM plan was accepted, validation errors if rejected, and the selected fallback or LLM plan.
-
-Show recent runs:
-
-```bash
-python main.py runs
-```
-
-Show a trace:
-
-```bash
-python main.py trace <run_id>
-```
-
-Inspect a run workspace:
-
-```bash
-python main.py workspace <run_id>
-python main.py workspace <run_id> --show-context
-```
-
-After approving a dangerous action, inspect the dry-run action result:
-
-```bash
-python main.py trace <run_id> --json | jq '.action_results'
-jq . var/runs/<run_id>/trace/action_results.json
-```
-
-Run diagnosis and handle pending approvals in the same terminal:
+### Interactive Approval Mode
 
 ```bash
 python main.py diagnose "为什么内存快满了？" \
@@ -121,19 +102,136 @@ python main.py diagnose "为什么内存快满了？" \
   --interactive-approval
 ```
 
-The interactive approval prompt supports:
+Interactive approval supports:
 
 ```text
-y=批准 / n=拒绝 / s=跳过 / q=退出
+y=approve dry-run / r=approve and real-execute / n=reject / s=skip / q=quit
 ```
 
-Run fixture eval:
+Real execution still requires explicit environment enablement and allowlisting. Without those gates, `r` is blocked safely.
+
+## Demo Scenarios
+
+### Demo 1: GPU Memory Pressure
+
+```bash
+python main.py diagnose "为什么 GPU 显存满了？" --resource-type gpu
+```
+
+Expected diagnosis:
+
+- GPU memory pressure detected when available
+- GPU process list inspected
+- suspicious process identified by PID, owner, command preview, and memory usage
+- risky action creates approval
+- approval produces dry-run `ActionResult` instead of killing the process
+
+Full walkthrough: [docs/demos/gpu_memory_pressure.md](docs/demos/gpu_memory_pressure.md)
+
+### Demo 2: Training Slowdown
+
+```bash
+python main.py diagnose "训练很慢，帮我看看瓶颈" --planner-mode llm --report-mode llm
+```
+
+Expected diagnosis:
+
+- LLM proposes a tool plan
+- `PlanValidator` validates or falls back to deterministic planning
+- GPU / CPU / memory tools run through `ToolRegistry`
+- report explains whether the bottleneck is GPU memory, CPU/DataLoader, memory, or swap pressure
+
+Full walkthrough: [docs/demos/training_slow.md](docs/demos/training_slow.md)
+
+### Demo 3: Memory Pressure / OOM
+
+```bash
+python main.py diagnose "为什么内存快满了？" --resource-type memory --interactive-approval
+```
+
+Expected diagnosis:
+
+- memory and swap pressure summarized
+- top memory processes ranked
+- OOM lookup included when available
+- dangerous recommendations require approval
+- approved action writes dry-run `ActionResult` to trace/workspace
+
+Full walkthrough: [docs/demos/memory_pressure.md](docs/demos/memory_pressure.md)
+
+## Safety Model
+
+ResourceOps separates diagnosis, approval, dry-run, and real execution.
+
+- Diagnostic tools are executed through `ToolRegistry`.
+- LLM planning is bounded by `ToolCatalog`, `ToolPlan`, and `PlanValidator`.
+- LLM reporting receives compact evidence context and cannot create new tool outputs.
+- `approve` and interactive `y` run dry-run action execution only.
+- Real execution uses the separate `execute-real` entrypoint.
+- Real execution requires `RESOURCEOPS_ENABLE_REAL_ACTIONS=true`, `RESOURCEOPS_REAL_ACTION_ALLOWLIST=<action>`, approval, successful dry-run, pre-check, post-check, and `--confirm-real`.
+
+Example real execution command:
+
+```bash
+RESOURCEOPS_ENABLE_REAL_ACTIONS=true \
+RESOURCEOPS_REAL_ACTION_ALLOWLIST=renice_process \
+python main.py execute-real <approval_id> --confirm-real
+```
+
+`kill_process` is intentionally dangerous and should only be allowlisted for controlled test processes.
+
+## Trace, Workspace, and Debug Bundle
+
+Each diagnosis run is persisted to SQLite trace storage and to an isolated workspace under `var/runs/<run_id>/`.
+
+```text
+var/runs/<run_id>/
+  metadata.json
+  plan.json
+  todos.json
+  report.md
+  raw/
+    tool_outputs.jsonl
+  compact/
+    report_context.json
+  trace/
+    steps.json
+    evidence.json
+    findings.json
+    approvals.json
+    action_results.json
+```
+
+Useful commands:
+
+```bash
+python main.py runs
+python main.py trace <run_id>
+python main.py trace <run_id> --json
+
+python main.py workspace <run_id>
+python main.py workspace <run_id> --show-report
+python main.py workspace <run_id> --show-context
+
+python main.py bundle <run_id>
+tar -tzf var/bundles/<run_id>.tar.gz
+```
+
+## Eval and Tests
+
+Run unit and integration tests:
+
+```bash
+python -m pytest -q
+```
+
+Run deterministic fixture eval:
 
 ```bash
 python eval/run_eval.py
 ```
 
-Run live smoke eval:
+Run live smoke eval against the current machine:
 
 ```bash
 python eval/run_live_smoke.py
@@ -147,19 +245,13 @@ python scripts/stress_memory.py --mb 256 --duration 10
 python scripts/stress_gpu_memory.py --mb 512 --duration 10 --yes
 ```
 
-Run the API:
+## FastAPI
 
 ```bash
 uvicorn app.api:app --host 0.0.0.0 --port 18000
 ```
 
-Or run with Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-HTTP diagnose:
+HTTP diagnosis:
 
 ```bash
 curl -sS -X POST http://localhost:18000/diagnose \
@@ -167,98 +259,60 @@ curl -sS -X POST http://localhost:18000/diagnose \
   -d '{"description":"为什么 GPU 显存满了？","resource_type":"gpu"}'
 ```
 
-Full HTTP demo flow:
+Docker Compose is also available:
 
 ```bash
-RUN_ID=$(
-  curl -sS -X POST http://localhost:18000/diagnose \
-    -H 'content-type: application/json' \
-    -d '{"description":"为什么内存快满了？","resource_type":"memory"}' \
-  | python -c 'import json,sys; print(json.load(sys.stdin)["run"]["run_id"])'
-)
-
-curl -sS http://localhost:18000/runs
-curl -sS http://localhost:18000/runs/$RUN_ID
-curl -sS http://localhost:18000/approvals
-```
-
-If the diagnosis creates an approval, approve or reject it:
-
-```bash
-APPROVAL_ID=$(
-  curl -sS http://localhost:18000/approvals \
-  | python -c 'import json,sys; data=json.load(sys.stdin); print(data[0]["approval_id"] if data else "")'
-)
-
-curl -sS -X POST http://localhost:18000/approvals/$APPROVAL_ID/approve
-curl -sS http://localhost:18000/runs/$RUN_ID
-
-# Real execution is a separate gated endpoint. By default this returns blocked.
-curl -sS -X POST http://localhost:18000/approvals/$APPROVAL_ID/execute-real \
-  -H 'content-type: application/json' \
-  -d '{"confirm_real":true}'
+docker compose up --build
 ```
 
 ## Project Layout
 
 ```text
 resourceops-agent/
-├── app/       # CLI, FastAPI, schemas
-├── agent/     # ResourceAgent and planning
-├── tools/     # ToolRegistry and real resource tools
-├── approval/  # Human approval store/service
-├── trace/     # SQLite trace store
-├── eval/      # fixture and live smoke eval
-├── scripts/   # bounded stress scripts
-├── tests/     # tool, planner, detector, agent, trace, API tests
-└── var/       # Runtime state, ignored by git in a future repo
+  actions/    # approval-gated dry-run and real action executor
+  agent/      # ResourceAgent, planning, validation, reports, todos
+  app/        # CLI, FastAPI, schemas
+  approval/   # approval store/service and trace synchronization
+  docs/       # design notes, demos, roadmap, development history
+  eval/       # deterministic fixture eval and live smoke eval
+  scripts/    # bounded local stress scripts
+  tests/      # unit and integration tests
+  tools/      # ToolRegistry and real local resource tools
+  trace/      # SQLite trace store and replay models
+  workspace/  # per-run workspace writer and debug bundle export
+  var/        # local runtime state, ignored by git
 ```
 
-## 后续路线
+## Known Limitations
 
-当前已完成到 **V1-P13**。后续路线分两层：V1 先把单 Agent 做成“可控的 LLM 工具使用 Agent”，V2 再扩展成完整 Agent Harness。
+- ResourceOps is local-machine focused. It does not yet integrate with Kubernetes, Prometheus, DCGM, or cloud observability APIs.
+- LLM behavior depends on the configured OpenAI-compatible endpoint; deterministic fallback remains the safety baseline.
+- Live smoke output depends on the current machine, GPU availability, process list, and system permissions.
+- Real execution is intentionally narrow and gated. It is not an autonomous remediation system.
+- The current CLI is the primary user experience; no web dashboard is included.
 
-V1-P8 已完成：
+## Roadmap
 
-- `ToolRegistry` 可以导出结构化 `ToolCatalog`，说明有哪些工具、参数 schema、权限等级、标签和适用资源类型。
-- deterministic planner 的固定计划已升级为 `ToolPlan` / `PlannedToolCall`。
-- `ResourceAgent` 现在按 `ToolPlan.steps` 执行工具，诊断行为与 P7.5 保持一致。
-- trace 普通视图和 JSON 视图都能看到本次使用的工具计划。
+The next major direction is V2: hooks/error recovery, reusable diagnostic skills, machine memory/baselines, subagents, background sampling, and eventually a guarded autonomous monitor.
 
-V1-P9 已完成：
+See [docs/ROADMAP.md](docs/ROADMAP.md) for details.
 
-- 新增 `llm_planner` 模式，LLM 根据用户问题和 `ToolCatalog` 提出候选 `ToolPlan`。
-- 新增 `PlanValidator`，校验工具名、参数 schema、步数预算、重复调用和权限边界。
-- LLM 候选计划不合法、LLM 不可用或调用失败时，自动 fallback 到 deterministic plan。
-- trace 记录 `llm_planner` 中间状态，包括候选计划、校验错误、fallback 原因和最终选择的计划。
+## Resume Summary
 
-V1-P10 / P10.8 已完成：
+ResourceOps Agent is an AI Infra / Agent Engineering project that demonstrates:
 
-- `ToolPlan` 会转换成可持久化的 `DiagnosisTodo`。
-- trace 能保存和展示 phase/task todo 状态。
-- CLI Rich Live 面板展示 Planning tools、Tool execution、Report、Approval、Action execution。
-- Current tasks 保留 Tool execution 历史工具任务、Approval 审批任务和 Action execution 预留阶段。
-- approve / reject 后同步 approval task、Approval phase 和 run.status。
-- `--interactive-approval` 支持在 diagnose 后批量列出 pending approvals 并逐个处理。
+- local observability tooling for GPU/CPU/memory/process diagnosis
+- bounded LLM tool planning with validation and deterministic fallback
+- evidence-backed reporting from structured traces
+- human approval and dry-run action execution before risky operations
+- workspace isolation and debug bundles for reproducibility
+- CLI, FastAPI, eval fixtures, and integration tests
 
-### V1 后续
+## Development History
 
-- V1-P11：Workspace Isolation 增强。把 plan、todos、raw tool outputs、compact context、report 都保存到 `var/runs/<run_id>/`，支持通过 `workspace <run_id>` 查看，并支持 `bundle <run_id>` 导出 debug bundle。
-- V1-P12：Action Executor dry-run。P12.1 / P12.2 已完成：approve 后生成 `ActionResult(mode=dry_run)`，并进入 trace、todo、workspace、CLI/API。
-- V1-P13：真实安全动作执行已完成。`inspect_process` 作为 safe read-only action surface；`renice_process` 作为 write-level gated real action；`kill_process` 作为 dangerous gated real action。write/dangerous 动作复用 execute-real、allowlist、approval、dry-run、pre-check、post-check 和二次确认边界。
+Detailed implementation stages and design notes are kept out of the README first screen:
 
-### V2 方向
-
-- V2-P1：Hooks 和 Error Recovery，在关键流程节点插入安全、审计、恢复逻辑。
-- V2-P2：Skills，让 planner 按场景加载 GPU OOM、CPU bottleneck、memory leak 等诊断技能。
-- V2-P3：Memory 和基线，记录机器基线、历史问题、常见安全进程和用户偏好。
-- V2-P4：Subagents，把 GPU / CPU / Memory / Process / Report 拆成独立子 Agent。
-- V2-P5：Agent Team，由 LeadResourceAgent 协调多个专职 Agent 完成诊断。
-- V2-P6：Background Tasks，支持 60 秒采样、内存增长观察、GPU 利用率趋势分析。
-- V2-P7：Autonomous Resource Monitor Agent，后台发现异常并自动创建诊断任务，但危险动作仍必须审批。
-- V2-P8：Workspace Isolation 完整化和 Debug Bundle，支持 replay、debug bundle 和多 Agent 上下文隔离。
-
-
-
-#### TODO or BUG
-1.在agent/report_context中，要对输入LLM的数据处理，对工具的检测结果的提取都是一一定制的，以后工具多了怎么办？是不是应该在每个工具都先默认1,2个，然后后续学习呢？
+- [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md)
+- [docs/DESIGN.md](docs/DESIGN.md)
+- [docs/ResourceOps_Agent_DESIGN.md](docs/ResourceOps_Agent_DESIGN.md)
+- [docs/STAGE_PAUSE_SUMMARY.md](docs/STAGE_PAUSE_SUMMARY.md)

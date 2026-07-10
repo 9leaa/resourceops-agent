@@ -4,7 +4,7 @@
 
 ---
 
-![Todo Overview](./resourceops_agent.png)
+![Todo Overview](./images/resourceops_agent.png)
 
 
 
@@ -1699,10 +1699,17 @@ POST `/diagnose` 请求：
 ```text
 resourceops-agent/
 ├── README.md
-├── DESIGN.md
 ├── requirements.txt
 ├── .env.example
 ├── main.py
+├── docs/
+│   ├── DESIGN.md
+│   ├── DEVELOPMENT_HISTORY.md
+│   ├── ROADMAP.md
+│   ├── ResourceOps_Agent_DESIGN.md
+│   ├── STAGE_PAUSE_SUMMARY.md
+│   ├── demos/
+│   └── images/
 ├── app/
 │   ├── api.py
 │   ├── cli.py

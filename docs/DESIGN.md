@@ -3,7 +3,7 @@
 The long-form design is currently maintained at:
 
 ```text
-/home/zcj/resourceops-agent/ResourceOps_Agent_DESIGN.md
+docs/ResourceOps_Agent_DESIGN.md
 ```
 
 This project implements that design as a separate ResourceOps codebase.
