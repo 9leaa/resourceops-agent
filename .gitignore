@@ -1,24 +1,37 @@
+# Python cache
 __pycache__/
 *.py[cod]
+
+# Test / type-check cache
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
+# Virtual environments
 .venv/
 venv/
 env/
+
+# Environment files
 .env
 .env.*
 !.env.example
 
+# Runtime outputs
 var/
+
+# Runtime logs / generated jsonl
+*.log
 *.jsonl
 
-.env
-.env.*
+# Keep source-controlled evaluation fixtures
+!eval/*.jsonl
+
+# Secrets / credentials
 *.pem
 *.key
 
+# OS / IDE files
 .DS_Store
 .vscode/
 .idea/

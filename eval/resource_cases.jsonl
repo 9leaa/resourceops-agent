@@ -1,0 +1,4 @@
+{"case_id":"gpu_memory_pressure","description":"为什么 GPU 显存满了？","resource_type":"gpu","fixture":"gpu_memory_pressure.json","expected_findings":["gpu_memory_pressure"],"approval_required":true}
+{"case_id":"cpu_saturation","description":"为什么 CPU 很高？","resource_type":"cpu","fixture":"cpu_saturation.json","expected_findings":["cpu_saturation"],"approval_required":false}
+{"case_id":"memory_pressure","description":"为什么内存快满了？","resource_type":"memory","fixture":"memory_pressure.json","expected_findings":["memory_pressure","swap_pressure"],"approval_required":false}
+{"case_id":"mixed_training_slow","description":"为什么训练任务很慢？","resource_type":"mixed","fixture":"mixed_training_slow.json","expected_findings":["cpu_bottleneck_for_gpu","cpu_saturation"],"approval_required":false}
