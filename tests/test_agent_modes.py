@@ -43,7 +43,7 @@ class FakeCombinedClient:
         )
 
     def generate_report(self, prompt: str) -> str:
-        assert "诊断上下文 JSON" in prompt
+        assert "诊断数据" in prompt
         return """## 问题概览
 LLM 最终报告。
 

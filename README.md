@@ -80,7 +80,15 @@ LLM settings are read from `.env` or environment variables:
 RESOURCEOPS_LLM_BASE_URL=http://127.0.0.1:3000/v1
 RESOURCEOPS_LLM_API_KEY=replace-with-your-key
 RESOURCEOPS_LLM_MODEL=replace-with-your-model
+RESOURCEOPS_LLM_SERVICE_TIER=fast
+RESOURCEOPS_LLM_PLANNER_MAX_TOKENS=512
+RESOURCEOPS_LLM_REPORT_MAX_TOKENS=640
+RESOURCEOPS_LLM_MAX_RETRIES=1
+RESOURCEOPS_LLM_RETRY_BACKOFF_SECONDS=1.0
+RESOURCEOPS_STORE_LLM_PAYLOADS=false
 ```
+
+`RESOURCEOPS_LLM_SERVICE_TIER` is optional and provider-specific. The planner and report output limits keep long LLM calls within common upstream gateway limits. Transient `429/502/503/504` and transport failures are retried once by default. Full prompts and responses are not stored unless `RESOURCEOPS_STORE_LLM_PAYLOADS=true`; hashes, lengths, latency, and redacted previews are always available in the compact LLM summary.
 
 ### LLM Planner Mode
 
@@ -188,14 +196,19 @@ Each diagnosis run is persisted to SQLite trace storage and to an isolated works
 var/runs/<run_id>/
   metadata.json
   plan.json
-  todos.json
   report.md
+  remediation_summary.md
+  summary/
+    run_summary.json
+    run_summary.md
   raw/
     tool_outputs.jsonl
+    llm_calls.jsonl        # only when explicitly enabled
   compact/
     report_context.json
+    llm_calls_summary.json
   trace/
-    steps.json
+    steps.json             # lightweight artifact index
     evidence.json
     findings.json
     approvals.json
@@ -207,6 +220,10 @@ Useful commands:
 ```bash
 python main.py runs
 python main.py trace <run_id>
+python main.py trace <run_id> --full
+python main.py trace <run_id> --step llm_planner
+python main.py trace <run_id> --llm
+python main.py trace <run_id> --summary-json
 python main.py trace <run_id> --json
 
 python main.py workspace <run_id>
@@ -214,8 +231,11 @@ python main.py workspace <run_id> --show-report
 python main.py workspace <run_id> --show-context
 
 python main.py bundle <run_id>
+python main.py bundle <run_id> --include-llm-payloads
 tar -tzf var/bundles/<run_id>.tar.gz
 ```
+
+The default trace view is a deterministic run summary. `--json` intentionally keeps the legacy full SQLite trace output for script compatibility. The report is a diagnosis-stage snapshot; approval and action changes are recorded separately in `remediation_summary.md`.
 
 ## Eval and Tests
 

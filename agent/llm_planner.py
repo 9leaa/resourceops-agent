@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from agent.llm_client import LlmClient
 from agent.plan_validator import PlanValidator
 from app.schemas import PlannedToolCall, PlannerMode, ResourceType, ToolCatalog, ToolPermissionLevel, ToolPlan
+from trace.llm_calls import build_llm_call_record
 
 
 SYSTEM_PROMPT = """你是 ResourceOps 的工具规划器。
@@ -32,10 +34,12 @@ class LlmPlanResult:
     prompt_length: int = 0
     response_length: int = 0
     response_preview: str | None = None
+    latency_ms: int = 0
     error_type: str | None = None
     error: str | None = None
     validation_errors: list[str] | None = None
     candidate_plan: dict[str, Any] | None = None
+    llm_call: dict[str, Any] | None = None
 
     @property
     def used_llm_plan(self) -> bool:
@@ -59,11 +63,13 @@ class LlmPlanResult:
             "prompt_length": self.prompt_length,
             "response_length": self.response_length,
             "response_preview": self.response_preview,
+            "latency_ms": self.latency_ms,
             "error_type": self.error_type,
             "error": self.error,
             "validation_errors": self.validation_errors or [],
             "candidate_plan": self.candidate_plan,
             "selected_plan": self.tool_plan.model_dump(mode="json"),
+            "llm_call": self.llm_call,
         }
 
 
@@ -96,6 +102,7 @@ def build_llm_tool_plan_result(
     )
     response = ""
     candidate_plan: ToolPlan | None = None
+    started = time.perf_counter()
 
     try:
         response = call_llm_planner(llm_client, prompt)
@@ -108,7 +115,9 @@ def build_llm_tool_plan_result(
             fallback_plan=fallback_plan,
         )
         validation = validator.validate(candidate_plan, expected_resource_type=resource_type)
-        if not validation.valid or validation.normalized_plan is None:
+        scope_errors = plan_resource_scope_errors(candidate_plan, tool_catalog, resource_type)
+        if not validation.valid or validation.normalized_plan is None or scope_errors:
+            latency_ms = max(1, int((time.perf_counter() - started) * 1000))
             return LlmPlanResult(
                 tool_plan=fallback,
                 source="deterministic",
@@ -118,13 +127,24 @@ def build_llm_tool_plan_result(
                 prompt_length=len(prompt),
                 response_length=len(response),
                 response_preview=preview_text(response),
-                validation_errors=validation.errors,
+                latency_ms=latency_ms,
+                validation_errors=[*validation.errors, *scope_errors],
                 candidate_plan=candidate_plan.model_dump(mode="json"),
+                llm_call=build_llm_call_record(
+                    purpose="planner",
+                    client=llm_client,
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    response=response,
+                    status="validation_failed",
+                    latency_ms=latency_ms,
+                ),
             )
 
         accepted_plan = validation.normalized_plan.model_copy(
             update={"fallback_plan": fallback_plan.steps}
         )
+        latency_ms = max(1, int((time.perf_counter() - started) * 1000))
         return LlmPlanResult(
             tool_plan=accepted_plan,
             source="llm",
@@ -133,9 +153,20 @@ def build_llm_tool_plan_result(
             prompt_length=len(prompt),
             response_length=len(response),
             response_preview=preview_text(response),
+            latency_ms=latency_ms,
             candidate_plan=candidate_plan.model_dump(mode="json"),
+            llm_call=build_llm_call_record(
+                purpose="planner",
+                client=llm_client,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response=response,
+                status="success",
+                latency_ms=latency_ms,
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - LLM boundary must fallback safely.
+        latency_ms = max(1, int((time.perf_counter() - started) * 1000))
         return LlmPlanResult(
             tool_plan=fallback,
             source="deterministic",
@@ -145,9 +176,21 @@ def build_llm_tool_plan_result(
             prompt_length=len(prompt),
             response_length=len(response),
             response_preview=preview_text(response) if response else None,
+            latency_ms=latency_ms,
             error_type=exc.__class__.__name__,
             error=str(exc),
             candidate_plan=candidate_plan.model_dump(mode="json") if candidate_plan else None,
+            llm_call=build_llm_call_record(
+                purpose="planner",
+                client=llm_client,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response=response,
+                status="failed",
+                latency_ms=latency_ms,
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+            ),
         )
 
 
@@ -158,6 +201,7 @@ def build_planner_prompt(
     tool_catalog: ToolCatalog,
     max_steps: int,
 ) -> str:
+    tools = scoped_catalog_tools(tool_catalog, resource_type)
     catalog_payload = {
         "catalog_version": tool_catalog.catalog_version,
         "tools": [
@@ -170,7 +214,7 @@ def build_planner_prompt(
                 "tags": tool.tags,
                 "resource_types": tool.resource_types,
             }
-            for tool in tool_catalog.tools
+            for tool in tools
         ],
     }
     return f"""请为 ResourceOps 生成一个工具调用计划。
@@ -189,6 +233,7 @@ def build_planner_prompt(
 5. 不要输出 Markdown，不要解释，只输出 JSON 对象。
 6. JSON 顶层必须包含 steps 数组。
 7. 每个 step 只能包含 tool_name、args、reason、expected_result。
+8. 当前资源类型不是 mixed 时，只能选择 resource_types 包含当前资源类型的工具。
 
 输出格式：
 {{
@@ -318,6 +363,34 @@ def compact_input_schema(input_schema: dict[str, Any]) -> dict[str, Any]:
         "properties": input_schema.get("properties", {}),
         "required": input_schema.get("required", []),
     }
+
+
+def scoped_catalog_tools(tool_catalog: ToolCatalog, resource_type: ResourceType) -> list[Any]:
+    if resource_type in {ResourceType.MIXED, ResourceType.UNKNOWN}:
+        return list(tool_catalog.tools)
+    return [
+        tool
+        for tool in tool_catalog.tools
+        if not tool.resource_types or resource_type in tool.resource_types
+    ]
+
+
+def plan_resource_scope_errors(
+    plan: ToolPlan,
+    tool_catalog: ToolCatalog,
+    resource_type: ResourceType,
+) -> list[str]:
+    if resource_type in {ResourceType.MIXED, ResourceType.UNKNOWN}:
+        return []
+    catalog_by_name = {tool.name: tool for tool in tool_catalog.tools}
+    errors: list[str] = []
+    for step in plan.steps:
+        tool = catalog_by_name.get(step.tool_name)
+        if tool is not None and tool.resource_types and resource_type not in tool.resource_types:
+            errors.append(
+                f"tool is outside resource scope: {step.tool_name} not in {resource_type.value}"
+            )
+    return errors
 
 
 def preview_text(text: str, limit: int = 500) -> str:

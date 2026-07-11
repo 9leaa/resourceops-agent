@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -178,7 +179,7 @@ class ResourceAgent:
                     },
                     observation=llm_plan_result.model_dump(),
                     observation_preview=llm_plan_result.preview,
-                    latency_ms=0,
+                    latency_ms=llm_plan_result.latency_ms,
                     error=llm_plan_result.error,
                 )
             )
@@ -301,6 +302,7 @@ class ResourceAgent:
                     args={
                         "context_version": report_context["context_version"],
                         "resource_type": resource_type.value,
+                        "serialized_chars": len(json.dumps(report_context, ensure_ascii=False)),
                     },
                     observation=report_context,
                     observation_preview=report_context_preview(report_context),
@@ -333,7 +335,7 @@ class ResourceAgent:
                     },
                     observation=llm_report_result.model_dump(),
                     observation_preview=llm_report_result.preview,
-                    latency_ms=0,
+                    latency_ms=llm_report_result.latency_ms,
                     error=llm_report_result.error,
                 )
             )

@@ -1,6 +1,6 @@
 import json
 
-from agent.llm_planner import build_llm_tool_plan_result, parse_planner_json
+from agent.llm_planner import build_llm_tool_plan_result, build_planner_prompt, parse_planner_json
 from agent.plan_validator import PlanValidator
 from agent.planner import build_tool_plan
 from agent.tool_catalog import build_tool_catalog
@@ -145,3 +145,36 @@ def test_llm_planner_falls_back_on_invalid_plan() -> None:
     assert result.fallback_reason == "plan_validation_failed"
     assert any("unknown tool" in error for error in result.validation_errors or [])
     assert result.tool_plan.planner_mode == "fallback"
+
+
+def test_planner_prompt_scopes_explicit_memory_request_to_memory_tools() -> None:
+    registry = default_registry()
+    catalog = build_tool_catalog(registry)
+
+    prompt = build_planner_prompt(
+        description="为什么内存快满了？",
+        resource_type=ResourceType.MEMORY,
+        tool_catalog=catalog,
+        max_steps=8,
+    )
+
+    assert '"name": "get_memory_snapshot"' in prompt
+    assert '"name": "list_top_memory_processes"' in prompt
+    assert '"name": "get_cpu_snapshot"' not in prompt
+    assert '"name": "get_gpu_snapshot"' not in prompt
+
+
+def test_planner_prompt_keeps_cross_resource_tools_for_mixed_request() -> None:
+    registry = default_registry()
+    catalog = build_tool_catalog(registry)
+
+    prompt = build_planner_prompt(
+        description="训练很慢，检查整体瓶颈",
+        resource_type=ResourceType.MIXED,
+        tool_catalog=catalog,
+        max_steps=8,
+    )
+
+    assert '"name": "get_memory_snapshot"' in prompt
+    assert '"name": "get_cpu_snapshot"' in prompt
+    assert '"name": "get_gpu_snapshot"' in prompt

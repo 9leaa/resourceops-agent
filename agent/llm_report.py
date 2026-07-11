@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,9 +10,16 @@ from agent.llm_client import LlmClient
 from agent.report_context import build_report_context
 from app.schemas import DiagnosisFinding, EvidenceItem, ResourceType
 from tools.registry import ToolExecutionResult
+from trace.llm_calls import build_llm_call_record
 
 
 REQUIRED_SECTIONS = ("问题概览", "关键证据", "诊断发现", "建议操作", "审批状态", "风险说明")
+SYSTEM_PROMPT = (
+    "你是 ResourceOps 的诊断报告撰写器。"
+    "输入数据已经由确定性工具和 Detector 生成。"
+    "你只能重组和解释输入中的事实，不能新增事实、工具结果、命令或操作。"
+    "必须准确区分：发现、建议、待审批、dry-run、真实执行。"
+)
 
 
 class LlmReportValidationError(ValueError):
@@ -26,8 +35,10 @@ class LlmReportResult:
     prompt_length: int = 0
     response_length: int = 0
     response_preview: str | None = None
+    latency_ms: int = 0
     error_type: str | None = None
     error: str | None = None
+    llm_call: dict[str, Any] | None = None
 
     @property
     def used_llm(self) -> bool:
@@ -50,8 +61,10 @@ class LlmReportResult:
             "prompt_length": self.prompt_length,
             "response_length": self.response_length,
             "response_preview": self.response_preview,
+            "latency_ms": self.latency_ms,
             "error_type": self.error_type,
             "error": self.error,
+            "llm_call": self.llm_call,
         }
 
 
@@ -111,9 +124,11 @@ def build_llm_report_result(
     prompt = build_report_prompt(report_context=context)
 
     report = ""
+    started = time.perf_counter()
     try:
         report = llm_client.generate_report(prompt).strip()
         validate_llm_report(report, approvals)
+        latency_ms = max(1, int((time.perf_counter() - started) * 1000))
         return LlmReportResult(
             final_report=report,
             source="llm",
@@ -121,8 +136,19 @@ def build_llm_report_result(
             prompt_length=len(prompt),
             response_length=len(report),
             response_preview=preview_text(report),
+            latency_ms=latency_ms,
+            llm_call=build_llm_call_record(
+                purpose="report",
+                client=llm_client,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response=report,
+                status="success",
+                latency_ms=latency_ms,
+            ),
         )
     except Exception as exc:
+        latency_ms = max(1, int((time.perf_counter() - started) * 1000))
         return LlmReportResult(
             final_report=deterministic_report,
             source="deterministic",
@@ -131,26 +157,39 @@ def build_llm_report_result(
             prompt_length=len(prompt),
             response_length=len(report),
             response_preview=preview_text(report) if report else None,
+            latency_ms=latency_ms,
             error_type=exc.__class__.__name__,
             error=str(exc),
+            llm_call=build_llm_call_record(
+                purpose="report",
+                client=llm_client,
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response=report,
+                status="failed",
+                latency_ms=latency_ms,
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+            ),
         )
 
 
 def build_report_prompt(*, report_context: dict[str, Any]) -> str:
-    return f"""请根据下面 JSON 生成中文 Markdown 诊断报告。
+    return f"""请根据下面的结构化诊断数据生成中文 Markdown 报告。
 
-硬性规则：
-1. 只能使用 JSON 中已有事实，不能编造证据。
-2. 不能新增工具调用结果。
-3. 不能新增危险操作。
-4. 不能把 pending approval 写成已执行。
-5. 如果有 pending approval，必须明确说明危险操作尚未执行。
-6. 必须包含这些章节：问题概览、关键证据、诊断发现、建议操作、审批状态、风险说明。
-7. tool_context 是经过代码筛选、限量和脱敏后的上下文；不要声称没有明细，除非 tool_context 中确实没有对应字段。
-8. evidence_items 和 findings 是确定性诊断结果；如果 tool_context 和 findings 表达不同，优先以 findings 为诊断结论，并用 tool_context 做解释补充。
-9. 不要生成或推荐 JSON 中没有明确给出的 CLI 命令；如果只有 action 名称，只能写 action 名称、风险和审批状态。
+要求：
+1. 只使用输入 JSON 中的事实。
+2. 重点解释 diagnosis.root_causes 与 key_evidence。
+3. system_summary 用于说明当前资源状态。
+4. ruled_out 只做简短排除说明，不展开无关细节。
+5. recommendations 必须保持原审批和执行状态；pending 审批必须写出 approval_id、pending 和“尚未执行”。
+6. 不生成 JSON 中不存在的命令、PID、数值或操作。
+7. 每节最多 2 条；诊断发现最多 3 条。相同 PID、数值和状态只出现一次，不在不同章节重复解释。
+8. 报告控制在 700～1100 个中文字符左右；问题概览只概括结论，关键证据写数值，其他章节不要复述数值。
 
-诊断上下文 JSON：
+必须包含：问题概览、关键证据、诊断发现、建议操作、审批状态、风险说明。
+
+诊断数据：
 ```json
 {json.dumps(report_context, ensure_ascii=False, indent=2)}
 ```
@@ -173,15 +212,37 @@ def validate_llm_report(report: str, approvals: list[dict[str, Any]]) -> None:
         if approval_id and approval_id not in normalized:
             raise LlmReportValidationError(f"pending approval not mentioned: {approval_id}")
 
+        approval_context = _approval_context(normalized, approval_id)
+        if not contains_any(approval_context, ("pending", "待审批", "尚未执行", "未执行")):
+            raise LlmReportValidationError(f"pending approval state is unclear: {approval_id}")
+        if _describes_executed(approval_context):
+            raise LlmReportValidationError(f"pending approval was described as executed: {approval_id}")
+
     if pending_approvals and not contains_any(normalized, ("尚未执行", "未执行", "待审批", "pending")):
         raise LlmReportValidationError("pending approval execution state is unclear")
-
-    if pending_approvals and "已执行" in normalized and not contains_any(normalized, ("尚未执行", "未执行")):
-        raise LlmReportValidationError("pending approval was described as executed")
 
 
 def contains_any(text: str, candidates: tuple[str, ...]) -> bool:
     return any(candidate in text for candidate in candidates)
+
+
+def _approval_context(report: str, approval_id: str, radius: int = 500) -> str:
+    if not approval_id:
+        return report
+    position = report.find(approval_id)
+    if position < 0:
+        return ""
+    return report[max(0, position - radius) : position + len(approval_id) + radius]
+
+
+def _describes_executed(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:审批状态|状态|status)\s*(?:为|is)?\s*[:=：]?\s*(?:已执行|executed)",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def preview_text(text: str, limit: int = 500) -> str:

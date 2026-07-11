@@ -51,7 +51,9 @@ def test_llm_report_uses_client_output() -> None:
 
     assert report == VALID_REPORT.strip()
     assert client.last_prompt is not None
-    assert "诊断上下文 JSON" in client.last_prompt
+    assert "诊断数据" in client.last_prompt
+    assert "diagnosis" in client.last_prompt
+    assert "tool_context" not in client.last_prompt
 
 
 def test_llm_report_falls_back_without_client() -> None:
@@ -100,7 +102,10 @@ def test_llm_report_falls_back_on_missing_sections() -> None:
 
 
 def test_llm_report_falls_back_when_pending_approval_is_marked_executed() -> None:
-    bad_report = VALID_REPORT.replace("危险操作尚未执行", "危险操作已执行")
+    bad_report = VALID_REPORT.replace(
+        "appr_test 当前为 pending，危险操作尚未执行",
+        "appr_test 当前审批状态为已执行，危险操作已执行",
+    )
 
     report = build_llm_report(
         deterministic_report="fallback report",
@@ -114,3 +119,23 @@ def test_llm_report_falls_back_when_pending_approval_is_marked_executed() -> Non
     )
 
     assert report == "fallback report"
+
+
+def test_llm_report_allows_explicit_pending_with_no_executed_actions() -> None:
+    report_text = VALID_REPORT.replace(
+        "危险操作尚未执行。",
+        "危险操作尚未执行；当前没有已执行操作。",
+    )
+
+    report = build_llm_report(
+        deterministic_report="fallback report",
+        description="为什么内存快满了？",
+        resource_type=ResourceType.MEMORY,
+        tool_results=[],
+        evidence_items=[],
+        findings=[],
+        approvals=[{"approval_id": "appr_test", "status": "pending"}],
+        llm_client=FakeLlmClient(report_text),
+    )
+
+    assert report == report_text.strip()

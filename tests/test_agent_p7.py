@@ -63,7 +63,7 @@ class FakeReportClient:
 
     def generate_report(self, prompt: str) -> str:
         self.last_prompt = prompt
-        assert "诊断上下文 JSON" in prompt
+        assert "诊断数据" in prompt
         return """## 问题概览
 这是 LLM 报告。
 
@@ -106,12 +106,13 @@ def test_p7_llm_report_mode_replaces_only_final_report() -> None:
     assert result.approvals == []
     assert result.requires_approval is False
     assert llm_client.last_prompt is not None
-    assert "tool_context" in llm_client.last_prompt
+    assert "system_summary" in llm_client.last_prompt
+    assert "tool_context" not in llm_client.last_prompt
 
     context_step = result.steps[-2]
     assert context_step.action == "build_report_context"
-    assert context_step.observation["context_version"] == "p7.5"
-    assert context_step.observation["counts"]["tools"] > 0
+    assert context_step.observation["context_version"] == "p14"
+    assert context_step.observation["provenance"]["source_tools"]
 
     llm_step = result.steps[-1]
     assert llm_step.action == "llm_report"
@@ -177,8 +178,4 @@ def test_p75_llm_prompt_includes_compact_cpu_process_context() -> None:
     assert "python train.py --config config.yaml" in llm_client.last_prompt
 
     context_step = [step for step in result.steps if step.action == "build_report_context"][0]
-    cpu_process_step = [
-        item for item in context_step.observation["tool_context"]
-        if item["tool_name"] == "list_top_cpu_processes"
-    ][0]
-    assert cpu_process_step["top_processes"][0]["pid"] == 4242
+    assert any("4242" in str(item["facts"]) for item in context_step.observation["key_evidence"])

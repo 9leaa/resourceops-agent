@@ -54,7 +54,7 @@ def test_trace_cli_prints_approvals(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr("app.cli.TraceStore", FakeTraceStore)
 
-    exit_code = main(["trace", "run_test"])
+    exit_code = main(["trace", "run_test", "--full"])
     captured = capsys.readouterr()
 
     assert exit_code == 0
@@ -351,7 +351,7 @@ def test_workspace_cli_json_output(monkeypatch, tmp_path, capsys) -> None:
 
     assert exit_code == 0
     assert payload["run_id"] == result.run.run_id
-    assert payload["metadata"]["workspace_version"] == "p11.5"
+    assert payload["metadata"]["workspace_version"] == "p14"
     assert any(item["relative_path"] == "report.md" for item in payload["files"])
 
 

@@ -17,7 +17,7 @@ def read_json(path):
 
 class FakeReportClient:
     def generate_report(self, prompt: str) -> str:
-        assert "诊断上下文 JSON" in prompt
+        assert "诊断数据" in prompt
         return """## 问题概览
 LLM 报告。
 
@@ -62,11 +62,16 @@ def test_workspace_writer_writes_agent_result(tmp_path) -> None:
     assert (run_dir / "trace" / "evidence.json").exists()
     assert (run_dir / "trace" / "findings.json").exists()
     assert (run_dir / "trace" / "approvals.json").exists()
+    assert (run_dir / "summary" / "run_summary.json").exists()
+    assert (run_dir / "summary" / "run_summary.md").exists()
+    assert (run_dir / "compact" / "llm_calls_summary.json").exists()
 
     metadata = read_json(run_dir / "metadata.json")
     assert metadata["run_id"] == result.run.run_id
     assert metadata["resource_type"] == "memory"
-    assert metadata["workspace_version"] == "p11.5"
+    assert metadata["workspace_version"] == "p14"
+    assert "final_report" not in metadata
+    assert metadata["report"]["path"] == "report.md"
     assert metadata["compact"]["report_context"] is False
     assert metadata["counts"]["tool_results"] == len(result.tool_results)
 
@@ -105,17 +110,17 @@ def test_workspace_writer_writes_report_context_for_llm_report(tmp_path) -> None
     run_dir = WorkspaceWriter(tmp_path / "runs").write_agent_result(result)
 
     metadata = read_json(run_dir / "metadata.json")
-    assert metadata["workspace_version"] == "p11.5"
+    assert metadata["workspace_version"] == "p14"
     assert metadata["compact"]["report_context"] is True
 
     report_context = read_json(run_dir / "compact" / "report_context.json")
     assert report_context["available"] is True
     assert report_context["source"] == "diagnosis_step.observation"
     assert report_context["step_action"] == "build_report_context"
-    assert report_context["context"]["context_version"] == "p7.5"
-    assert report_context["context"]["resource_type"] == "memory"
-    assert report_context["context"]["counts"]["tools"] > 0
-    assert "tool_context" in report_context["context"]
+    assert report_context["context"]["context_version"] == "p14"
+    assert report_context["context"]["incident"]["resource_type"] == "memory"
+    assert report_context["context"]["provenance"]["source_tools"]
+    assert "tool_context" not in report_context["context"]
 
 
 def test_workspace_writer_updates_approval_files_from_trace(tmp_path) -> None:

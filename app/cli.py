@@ -18,6 +18,8 @@ from approval.store import ApprovalStore
 from approval.trace_sync import sync_approval_trace
 from app.schemas import ApprovalStatus, DiagnosisTodo, IncidentSource, ResourceIncident, ResourceType, Severity
 from trace.store import TraceStore
+from trace.llm_calls import extract_llm_calls, public_llm_call
+from trace.summary import build_run_summary, render_run_summary_console
 
 from workspace.writer import WorkspaceWriter
 
@@ -76,7 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     trace_parser = subparsers.add_parser("trace", help="Show a traced diagnosis run.")
     trace_parser.add_argument("run_id")
-    trace_parser.add_argument("--json", action="store_true")
+    trace_parser.add_argument("--full", action="store_true", help="Show detailed steps, findings, approvals, and actions.")
+    trace_parser.add_argument("--step", help="Only show steps matching this action name.")
+    trace_parser.add_argument("--llm", action="store_true", help="Only show LLM call summaries.")
+    trace_parser.add_argument("--summary-json", action="store_true", help="Print the deterministic run summary as JSON.")
+    trace_parser.add_argument("--json", action="store_true", help="Print the legacy full trace JSON.")
 
     approvals_parser = subparsers.add_parser("approvals", help="List pending approvals.")
     approvals_parser.add_argument("--json", action="store_true")
@@ -102,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_parser = subparsers.add_parser("bundle", help="Create a debug bundle from a run workspace.")
     bundle_parser.add_argument("run_id")
     bundle_parser.add_argument("--json", action="store_true")
+    bundle_parser.add_argument(
+        "--include-llm-payloads",
+        action="store_true",
+        help="Include raw LLM payloads when they were explicitly stored.",
+    )
 
     execute_real_parser = subparsers.add_parser("execute-real", help="Execute an approved action for real.")
     execute_real_parser.add_argument("approval_id")
@@ -642,7 +653,10 @@ def handle_workspace(args: argparse.Namespace) -> int:
 
 def handle_bundle(args: argparse.Namespace) -> int:
     try:
-        bundle_path = WorkspaceWriter().create_bundle(args.run_id)
+        bundle_path = WorkspaceWriter().create_bundle(
+            args.run_id,
+            include_llm_payloads=args.include_llm_payloads,
+        )
     except OSError as exc:
         print(f"bundle failed: {exc}", file=sys.stderr)
         return 1
@@ -1001,9 +1015,21 @@ def plain_todo_status_icon(status: str | None) -> str:
 
 def handle_trace(args: argparse.Namespace) -> int:
     trace = TraceStore().get_trace(args.run_id)
+    summary = build_run_summary(trace)
     if args.json:
         print(json.dumps(trace, ensure_ascii=False, indent=2))
-    else:
+    elif args.summary_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    elif args.llm:
+        records = [public_llm_call(record) for record in extract_llm_calls(trace.get("steps") or [])]
+        if records:
+            print(json.dumps({"summary_version": "v1", "calls": records}, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({"summary_version": "v1", "calls": []}, ensure_ascii=False, indent=2))
+    elif args.step:
+        matched = [step for step in trace.get("steps") or [] if step.get("action") == args.step]
+        print(json.dumps(matched, ensure_ascii=False, indent=2))
+    elif args.full:
         run = trace["run"]
         print(f"run_id={run['run_id']} status={run['status']} resource_type={run['resource_type']}")
         print(f"user_input={run['user_input']}")
@@ -1062,7 +1088,9 @@ def handle_trace(args: argparse.Namespace) -> int:
                 )
         else:
             print("- none")
-        
+    else:
+        render_run_summary_console(summary)
+
     return 0
 
 

@@ -1,5 +1,15 @@
-from agent.report_context import COMMAND_PREVIEW_LIMIT, build_report_context
-from app.schemas import ResourceType, ToolCallStatus, ToolPermissionLevel
+import json
+
+from agent.llm_report import build_report_prompt
+from agent.report_context import build_report_context
+from app.schemas import (
+    DiagnosisFinding,
+    EvidenceItem,
+    Recommendation,
+    ResourceType,
+    ToolCallStatus,
+    ToolPermissionLevel,
+)
 from tools.registry import ToolExecutionResult
 
 
@@ -11,106 +21,139 @@ def tool_result(name: str, data: dict) -> ToolExecutionResult:
         data=data,
         preview=f"{name} preview",
         summary=f"{name} summary",
-        latency_ms=0,
+        latency_ms=4,
         validated_args={},
     )
 
 
-def test_report_context_includes_top_cpu_process_details() -> None:
-    context = build_report_context(
-        description="为什么 CPU 很高？",
-        resource_type=ResourceType.CPU,
-        tool_results=[
-            tool_result(
-                "list_top_cpu_processes",
-                {
-                    "processes": [
-                        {
-                            "pid": 123,
-                            "username": "zcj",
-                            "cpu_percent": 180.5,
-                            "memory_percent": 3.2,
-                            "rss_mb": 512,
-                            "command": "python train.py --config config.yaml",
-                            "started_at": "2026-06-27T00:00:00Z",
-                        }
-                    ]
-                },
-            )
-        ],
-        evidence_items=[],
-        findings=[],
-        approvals=[],
+def evidence(index: int, confidence: float = 0.8) -> EvidenceItem:
+    return EvidenceItem(
+        evidence_id=f"ev_{index}",
+        run_id="run_test",
+        source_tool="list_top_memory_processes",
+        category="process",
+        level="warning",
+        message=f"PID {index} uses a large amount of memory",
+        data={
+            "process": {
+                "pid": index,
+                "rss_mb": 20000 + index,
+                "memory_percent": 62.5,
+                "command": "python train.py --api-key sk-secretvalue",
+            },
+            "total_mb": 32000,
+        },
+        confidence=confidence,
     )
 
-    top_process = context["tool_context"][0]["top_processes"][0]
-    assert top_process["pid"] == 123
-    assert top_process["cpu_percent"] == 180.5
-    assert top_process["command_preview"] == "python train.py --config config.yaml"
+
+def finding(index: int, evidence_ids: list[str], confidence: float = 0.8) -> DiagnosisFinding:
+    return DiagnosisFinding(
+        finding_id=f"find_{index}",
+        run_id="run_test",
+        finding_type=f"memory_pressure_{index}",
+        title=f"Memory pressure {index}",
+        description="A deterministic memory finding.",
+        evidence_ids=evidence_ids,
+        confidence=confidence,
+        recommended_actions=[
+            Recommendation(
+                action="kill_process",
+                description="Terminate the confirmed process.",
+                risk="dangerous",
+                requires_approval=True,
+                reason="The process owns most memory.",
+            )
+        ],
+        requires_approval=True,
+    )
 
 
-def test_report_context_limits_and_truncates_process_commands() -> None:
-    long_command = "python train.py " + ("--very-long-arg " * 40)
-    processes = [
-        {
-            "pid": index,
-            "username": "zcj",
-            "rss_mb": 100 + index,
-            "vms_mb": 200 + index,
-            "memory_percent": index,
-            "command": long_command,
-        }
-        for index in range(10)
-    ]
+def test_context_prioritizes_finding_evidence_and_deduplicates() -> None:
+    items = [evidence(1, 0.4), evidence(2, 0.99), evidence(3, 0.7)]
+    findings = [finding(1, ["ev_1", "ev_1"], 0.9)]
 
     context = build_report_context(
         description="为什么内存快满了？",
         resource_type=ResourceType.MEMORY,
-        tool_results=[tool_result("list_top_memory_processes", {"processes": processes})],
-        evidence_items=[],
-        findings=[],
+        tool_results=[],
+        evidence_items=items,
+        findings=findings,
         approvals=[],
     )
 
-    tool_context = context["tool_context"][0]
-    assert len(tool_context["top_processes"]) == 5
-    assert tool_context["truncated"] is True
-    assert len(tool_context["top_processes"][0]["command_preview"]) <= COMMAND_PREVIEW_LIMIT + 3
+    assert [item["evidence_id"] for item in context["key_evidence"]] == ["ev_1", "ev_2", "ev_3"]
 
 
-def test_report_context_redacts_sensitive_command_values() -> None:
+def test_context_limits_findings_and_evidence() -> None:
+    items = [evidence(index, 1 - index / 100) for index in range(8)]
+    findings = [finding(index, [f"ev_{index}"], 1 - index / 100) for index in range(5)]
+
     context = build_report_context(
-        description="为什么 CPU 很高？",
-        resource_type=ResourceType.CPU,
+        description="memory",
+        resource_type=ResourceType.MEMORY,
+        tool_results=[],
+        evidence_items=items,
+        findings=findings,
+        approvals=[],
+    )
+
+    assert len(context["diagnosis"]["root_causes"]) == 3
+    assert len(context["key_evidence"]) == 5
+    assert context["provenance"]["context_truncated"] is True
+
+
+def test_context_excludes_unrelated_process_lists_but_keeps_memory_metrics() -> None:
+    context = build_report_context(
+        description="为什么内存快满了？",
+        resource_type=ResourceType.MEMORY,
         tool_results=[
             tool_result(
+                "get_memory_snapshot",
+                {"total_mb": 32000, "available_mb": 256, "used_percent": 96, "swap_used_percent": 60},
+            ),
+            tool_result(
                 "list_top_cpu_processes",
-                {
-                    "processes": [
-                        {
-                            "pid": 123,
-                            "username": "zcj",
-                            "cpu_percent": 10,
-                            "memory_percent": 1,
-                            "rss_mb": 100,
-                            "command": "python app.py --api-key sk-secretvalue token=abc123",
-                        }
-                    ]
-                },
-            )
+                {"processes": [{"pid": 999, "command": "unrelated process", "cpu_percent": 20}]},
+            ),
         ],
         evidence_items=[],
         findings=[],
         approvals=[],
     )
 
-    command = context["tool_context"][0]["top_processes"][0]["command_preview"]
-    assert "sk-secretvalue" not in command
-    assert "abc123" not in command
-    assert "<redacted>" in command
+    serialized = json.dumps(context, ensure_ascii=False)
+    assert context["system_summary"]["memory"]["used_percent"] == 96
+    assert "unrelated process" not in serialized
+    assert "tool_context" not in context
 
 
-def test_report_context_keeps_gpu_snapshot_details() -> None:
+def test_context_keeps_approval_status_and_redacts_sensitive_values() -> None:
+    item = evidence(12345)
+    context = build_report_context(
+        description="为什么内存快满了？ token=question-secret",
+        resource_type=ResourceType.MEMORY,
+        tool_results=[],
+        evidence_items=[item],
+        findings=[finding(1, [item.evidence_id], 0.9)],
+        approvals=[
+            {
+                "approval_id": "appr_test",
+                "action": "kill_process",
+                "status": "pending",
+            }
+        ],
+    )
+
+    serialized = json.dumps(context, ensure_ascii=False)
+    assert context["recommendations"][0]["approval_id"] == "appr_test"
+    assert context["recommendations"][0]["approval_status"] == "pending"
+    assert "sk-secretvalue" not in serialized
+    assert "question-secret" not in serialized
+    assert "<redacted>" in serialized
+
+
+def test_context_keeps_gpu_summary_and_ruled_out_state() -> None:
     context = build_report_context(
         description="为什么 GPU 显存满了？",
         resource_type=ResourceType.GPU,
@@ -119,7 +162,6 @@ def test_report_context_keeps_gpu_snapshot_details() -> None:
                 "get_gpu_snapshot",
                 {
                     "available": True,
-                    "driver_version": "555.0",
                     "gpus": [
                         {
                             "index": 0,
@@ -128,7 +170,6 @@ def test_report_context_keeps_gpu_snapshot_details() -> None:
                             "memory_used_mb": 22000,
                             "memory_total_mb": 24576,
                             "memory_used_percent": 89.5,
-                            "temperature_c": 55,
                         }
                     ],
                 },
@@ -139,7 +180,26 @@ def test_report_context_keeps_gpu_snapshot_details() -> None:
         approvals=[],
     )
 
-    gpu = context["tool_context"][0]["gpu"]["gpus"][0]
-    assert gpu["index"] == 0
-    assert gpu["memory_used_percent"] == 89.5
-    assert gpu["memory_used_mb"] == 22000
+    assert context["system_summary"]["gpu"]["devices"][0]["memory_used_percent"] == 89.5
+    assert context["ruled_out"][0]["condition"] == "gpu_pressure"
+    assert context["ruled_out"][0]["matched"] is False
+
+
+def test_context_serialized_size_is_bounded() -> None:
+    items = [evidence(index) for index in range(10)]
+    context = build_report_context(
+        description="为什么内存快满了？",
+        resource_type=ResourceType.MEMORY,
+        tool_results=[],
+        evidence_items=items,
+        findings=[finding(1, [item.evidence_id for item in items])],
+        approvals=[],
+    )
+
+    assert len(json.dumps(context, ensure_ascii=False)) <= 5500
+    prompt = build_report_prompt(report_context=context)
+    assert len(prompt) <= 6000
+    assert all(
+        section in prompt
+        for section in ("问题概览", "关键证据", "诊断发现", "建议操作", "审批状态", "风险说明")
+    )
