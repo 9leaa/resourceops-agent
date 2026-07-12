@@ -33,6 +33,45 @@ def build_memory_result(trace_store: TraceStore | None = None):
     )
 
 
+def test_collect_and_detect_does_not_persist_approval_before_snapshot_save(tmp_path: Path) -> None:
+    trace_store = TraceStore(tmp_path / "trace.sqlite3")
+    approval_service = ApprovalService(store=ApprovalStore(trace_store=trace_store))
+    agent = ResourceAgent(
+        registry=MemoryPressureRegistry(),
+        approval_service=approval_service,
+    )
+
+    snapshot = agent.collect_and_detect(
+        ResourceIncident(description="为什么内存快满了？", resource_type="memory")
+    )
+    approval_id = snapshot.approvals[0]["approval_id"]
+
+    assert trace_store.list_approvals(status=None) == []
+
+    trace_store.save_diagnosis_snapshot(snapshot)
+
+    assert trace_store.get_approval(approval_id).status == "pending"
+    assert trace_store.get_trace(snapshot.run.run_id)["run"]["run_id"] == snapshot.run.run_id
+
+
+def test_snapshot_failure_does_not_leave_orphan_approval(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "trace.sqlite3"
+    trace_store = TraceStore(db_path)
+    result = build_memory_result(trace_store)
+
+    def fail_save_finding(_finding, *, connection=None):
+        raise RuntimeError("forced finding failure")
+
+    monkeypatch.setattr(trace_store, "save_finding", fail_save_finding)
+
+    with pytest.raises(RuntimeError, match="forced finding failure"):
+        trace_store.save_agent_result(result)
+
+    assert table_count(db_path, "diagnosis_runs", result.run.run_id) == 0
+    assert table_count(db_path, "approvals", result.run.run_id) == 0
+    assert table_count(db_path, "diagnosis_todos", result.run.run_id) == 0
+
+
 def test_save_agent_result_is_transactional_on_failure(monkeypatch, tmp_path: Path) -> None:
     db_path = tmp_path / "trace.sqlite3"
     trace_store = TraceStore(db_path)

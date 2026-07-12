@@ -8,7 +8,7 @@ from trace.store import TraceStore
 
 def test_trace_saves_p4_approvals(tmp_path) -> None:
     trace_store = TraceStore(tmp_path / "resourceops.sqlite3")
-    approval_store = ApprovalStore(tmp_path / "approvals.jsonl")
+    approval_store = ApprovalStore(trace_store=trace_store)
     approval_service = ApprovalService(store=approval_store)
 
     result = ResourceAgent(

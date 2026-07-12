@@ -33,7 +33,7 @@ def test_workspace_steps_are_compact_and_reference_raw_artifacts(tmp_path) -> No
 
 def test_action_refresh_creates_remediation_summary_and_reconciles_report(tmp_path) -> None:
     trace_store = TraceStore(tmp_path / "trace.sqlite3")
-    approval_store = ApprovalStore(tmp_path / "approvals.jsonl")
+    approval_store = ApprovalStore(trace_store=trace_store)
     approval_service = ApprovalService(store=approval_store)
     result = ResourceAgent(
         registry=MemoryPressureRegistry(),

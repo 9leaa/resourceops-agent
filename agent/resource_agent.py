@@ -519,7 +519,7 @@ class ResourceAgent:
                 if not action.requires_approval:
                     continue
 
-                approval = self.approval_service.request_approval(
+                approval = self.approval_service.build_approval(
                     run_id=run_id,
                     action=action.action,
                     args=approval_args_from_recommendation(action),

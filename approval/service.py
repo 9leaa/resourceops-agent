@@ -30,24 +30,39 @@ class ApprovalService:
         args: dict[str, Any],
         reason: str,
         risk: RiskLevel = RiskLevel.DANGEROUS,
+        *,
+        persist: bool = True,
     ) -> Approval:
-        """
-        创建审批并保存
-        args：
-            哪一次诊断运行
-            待审批动作名称
-            动作参数
-            为什么需要这个动作
-            风险等级：默认dangerous
-        """
-        return self.store.save(
-            Approval(
-                run_id=run_id,
-                action=action,
-                args=args,
-                reason=reason,
-                risk=risk,
-            )
+        """Create an approval, preserving the old persisted-by-default API."""
+
+        approval = self.build_approval(
+            run_id=run_id,
+            action=action,
+            args=args,
+            reason=reason,
+            risk=risk,
+        )
+        if persist:
+            return self.store.save(approval)
+        return approval
+
+    def build_approval(
+        self,
+        *,
+        run_id: str,
+        action: str,
+        args: dict[str, Any],
+        reason: str,
+        risk: RiskLevel = RiskLevel.DANGEROUS,
+    ) -> Approval:
+        """Build an approval object without persisting it."""
+
+        return Approval(
+            run_id=run_id,
+            action=action,
+            args=args,
+            reason=reason,
+            risk=risk,
         )
 
     def list_pending(self) -> list[Approval]:
