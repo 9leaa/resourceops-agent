@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from actions.executor import ActionResult
 from app.schemas import Approval, ApprovalStatus
 from trace.store import TraceStore, resolve_trace_db
 
@@ -64,3 +65,25 @@ class ApprovalStore:
             decided_at=decided_at,
             executed_at=executed_at,
         )
+
+    def claim_for_dry_run(self, approval_id: str) -> Approval:
+        return self.trace_store.claim_approval_for_dry_run(approval_id)
+
+    def restore_claim(self, approval_id: str) -> Approval:
+        return self.trace_store.restore_approval_claim(approval_id)
+
+    def finalize_action(
+        self,
+        *,
+        approval_id: str,
+        action_result: ActionResult,
+        expected_statuses: set[ApprovalStatus] | None = None,
+    ) -> Approval:
+        return self.trace_store.finalize_approval_action(
+            approval_id=approval_id,
+            action_result=action_result,
+            expected_statuses=expected_statuses,
+        )
+
+    def reject_pending(self, approval_id: str) -> Approval:
+        return self.trace_store.reject_pending_approval(approval_id)

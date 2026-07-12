@@ -85,7 +85,7 @@ class FailingReportClient:
 
 
 def build_agent(tmp_path, llm_client):
-    approval_store = ApprovalStore(tmp_path / "approvals.jsonl")
+    approval_store = ApprovalStore(tmp_path / "trace.sqlite3")
     approval_service = ApprovalService(store=approval_store)
     agent = ResourceAgent(
         registry=MemoryPressureRegistry(),

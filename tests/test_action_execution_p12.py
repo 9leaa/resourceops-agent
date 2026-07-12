@@ -12,7 +12,7 @@ from workspace.writer import WorkspaceWriter
 
 def test_p12_approve_records_action_result_in_trace_and_workspace(tmp_path) -> None:
     trace_store = TraceStore(tmp_path / "resourceops.sqlite3")
-    approval_store = ApprovalStore(tmp_path / "approvals.jsonl")
+    approval_store = ApprovalStore(trace_store=trace_store)
     approval_service = ApprovalService(store=approval_store)
 
     result = ResourceAgent(

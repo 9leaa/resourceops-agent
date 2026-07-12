@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
@@ -23,6 +24,7 @@ def report_worker_count() -> int:
 REPORT_EXECUTOR = ThreadPoolExecutor(max_workers=report_worker_count())
 REPORT_JOBS: dict[str, Future] = {}
 REPORT_JOBS_LOCK = Lock()
+logger = logging.getLogger(__name__)
 
 
 def submit_report_job(
@@ -86,20 +88,20 @@ def run_report_job(
         latest_trace = trace_store.get_trace(run_id)
         report = reconcile_report_snapshot_with_trace(report, latest_trace)
 
-        trace_store.save_report_snapshot(report)
-        trace_store.update_report_status(
-            run_id,
-            final_report_status(report),
+        trace_store.finalize_report_snapshot(
+            report,
+            report_status=final_report_status(report),
             finished_at=utc_now(),
         )
-        workspace_writer.apply_report_snapshot(report, trace_store=trace_store)
+        try:
+            workspace_writer.apply_report_snapshot(report, trace_store=trace_store)
+        except OSError as exc:
+            logger.warning(
+                "workspace report snapshot write failed",
+                extra={"run_id": run_id, "error": str(exc)},
+            )
     except Exception as exc:
-        trace_store.update_report_status(
-            run_id,
-            ReportGenerationStatus.FAILED,
-            error=str(exc),
-            finished_at=utc_now(),
-        )
+        trace_store.mark_report_failed(run_id, str(exc))
         raise
 
 

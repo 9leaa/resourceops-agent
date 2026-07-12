@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, status
@@ -8,6 +10,7 @@ from pydantic import Field
 from agent.resource_agent import ResourceAgent
 from app.report_jobs import recover_interrupted_report_jobs, submit_report_job
 from approval.service import ApprovalService
+from approval.errors import ApprovalTransitionConflict
 from approval.store import ApprovalStore
 from approval.trace_sync import sync_approval_trace
 from app.schemas import (
@@ -24,11 +27,35 @@ from trace.store import TraceStore
 from workspace.writer import WorkspaceWriter
 
 app = FastAPI(title="ResourceOps Agent", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
 def recover_report_jobs_on_startup() -> None:
+    warn_if_multiple_api_workers()
     recover_interrupted_report_jobs(build_trace_store())
+
+
+def configured_api_worker_count() -> int | None:
+    for name in ("RESOURCEOPS_API_WORKERS", "WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning("invalid API worker count", extra={"env_var": name, "value": raw})
+            return None
+    return None
+
+
+def warn_if_multiple_api_workers() -> None:
+    worker_count = configured_api_worker_count()
+    if worker_count is not None and worker_count > 1:
+        logger.warning(
+            "in-process report jobs only support a single API worker",
+            extra={"worker_count": worker_count},
+        )
 
 
 class DiagnoseRequest(StrictBaseModel):
@@ -119,7 +146,13 @@ def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
 
     trace_store.save_diagnosis_snapshot(snapshot)
     workspace_writer = WorkspaceWriter()
-    workspace_writer.write_diagnosis_snapshot(snapshot)
+    try:
+        workspace_writer.write_diagnosis_snapshot(snapshot)
+    except OSError as exc:
+        logger.warning(
+            "workspace diagnosis snapshot write failed",
+            extra={"run_id": snapshot.run.run_id, "error": str(exc)},
+        )
     submit_report_job(
         agent=agent,
         snapshot=snapshot,
@@ -207,6 +240,8 @@ def approve(approval_id: str) -> dict[str, Any]:
         approval, tool_result, action_result = service.approve_with_action_result(approval_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalTransitionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sync_approval_trace(trace_store, approval_store, approval, action_result)
@@ -230,6 +265,8 @@ def execute_real(approval_id: str, request: ExecuteRealRequest) -> dict[str, Any
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalTransitionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -250,6 +287,8 @@ def reject(approval_id: str) -> dict[str, Any]:
         approval = service.reject(approval_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalTransitionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sync_approval_trace(trace_store, approval_store, approval)

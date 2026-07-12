@@ -21,7 +21,8 @@ from agent.report_reconcile import reconcile_report_snapshot_with_trace
 from approval.service import ApprovalService
 from approval.store import ApprovalStore
 from approval.trace_sync import sync_approval_trace
-from app.schemas import ApprovalStatus, DiagnosisTodo, IncidentSource, ResourceIncident, ResourceType, Severity
+from app.report_jobs import final_report_status
+from app.schemas import ApprovalStatus, DiagnosisTodo, IncidentSource, ResourceIncident, ResourceType, Severity, utc_now
 from trace.store import TraceStore
 from trace.llm_calls import extract_llm_calls, public_llm_call
 from trace.summary import build_run_summary, render_run_summary_console
@@ -240,7 +241,11 @@ def handle_interactive_decoupled_diagnose(
                 trace_store=trace_store,
                 event_sink=event_sink,
             )
-            trace_store.save_report_snapshot(report)
+            trace_store.finalize_report_snapshot(
+                report,
+                report_status=final_report_status(report),
+                finished_at=utc_now(),
+            )
             WorkspaceWriter().apply_report_snapshot(report, trace_store=trace_store)
             if event_sink is not None:
                 refresh_todo_sink_from_trace(event_sink, snapshot.run.run_id, trace_store)

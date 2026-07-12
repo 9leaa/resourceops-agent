@@ -3,6 +3,7 @@ from approval.service import ApprovalService
 from approval.store import ApprovalStore
 from app.schemas import ResourceIncident
 from tests.fixtures import MemoryPressureRegistry
+from trace.store import TraceStore
 
 
 def test_p4_creates_approval_for_dangerous_recommendation(tmp_path) -> None:
@@ -25,6 +26,7 @@ def test_p4_creates_approval_for_dangerous_recommendation(tmp_path) -> None:
     assert approval["status"] == "pending"
     assert approval["risk"] == "dangerous"
 
+    TraceStore(approval_store.path).save_agent_result(result)
     pending = approval_store.list(status="pending")
     assert len(pending) == 1
     assert pending[0].approval_id == approval["approval_id"]
@@ -42,6 +44,7 @@ def test_p4_approve_simulates_dangerous_action(tmp_path) -> None:
     )
 
     approval_id = result.approvals[0]["approval_id"]
+    TraceStore(approval_store.path).save_agent_result(result)
     approval, tool_result = approval_service.approve(approval_id)
 
     assert approval.status == "executed"
@@ -62,6 +65,7 @@ def test_p4_reject_keeps_action_unexecuted(tmp_path) -> None:
     )
 
     approval_id = result.approvals[0]["approval_id"]
+    TraceStore(approval_store.path).save_agent_result(result)
     approval = approval_service.reject(approval_id)
 
     assert approval.status == "rejected"

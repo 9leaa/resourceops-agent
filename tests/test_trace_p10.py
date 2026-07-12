@@ -54,7 +54,7 @@ def test_p10_trace_saves_and_loads_layered_todos(tmp_path) -> None:
 
 def test_p10_approval_sync_updates_todo_status(tmp_path) -> None:
     trace_store = TraceStore(tmp_path / "resourceops.sqlite3")
-    approval_store = ApprovalStore(tmp_path / "approvals.jsonl")
+    approval_store = ApprovalStore(trace_store=trace_store)
     approval_service = ApprovalService(store=approval_store)
 
     result = ResourceAgent(

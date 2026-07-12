@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from actions.executor import ActionExecutor, ActionMode, ActionResult, ActionStatus
-from app.schemas import Approval, ApprovalStatus, RiskLevel, ToolCallStatus, ToolPermissionLevel, utc_now
+from app.schemas import Approval, ApprovalStatus, RiskLevel, ToolCallStatus, ToolPermissionLevel
 from approval.store import ApprovalStore
 from tools.registry import ToolExecutionResult
 
@@ -30,24 +30,39 @@ class ApprovalService:
         args: dict[str, Any],
         reason: str,
         risk: RiskLevel = RiskLevel.DANGEROUS,
+        *,
+        persist: bool = True,
     ) -> Approval:
-        """
-        创建审批并保存
-        args：
-            哪一次诊断运行
-            待审批动作名称
-            动作参数
-            为什么需要这个动作
-            风险等级：默认dangerous
-        """
-        return self.store.save(
-            Approval(
-                run_id=run_id,
-                action=action,
-                args=args,
-                reason=reason,
-                risk=risk,
-            )
+        """Create an approval, preserving the old persisted-by-default API."""
+
+        approval = self.build_approval(
+            run_id=run_id,
+            action=action,
+            args=args,
+            reason=reason,
+            risk=risk,
+        )
+        if persist:
+            return self.store.save(approval)
+        return approval
+
+    def build_approval(
+        self,
+        *,
+        run_id: str,
+        action: str,
+        args: dict[str, Any],
+        reason: str,
+        risk: RiskLevel = RiskLevel.DANGEROUS,
+    ) -> Approval:
+        """Build an approval object without persisting it."""
+
+        return Approval(
+            run_id=run_id,
+            action=action,
+            args=args,
+            reason=reason,
+            risk=risk,
         )
 
     def list_pending(self) -> list[Approval]:
@@ -67,30 +82,24 @@ class ApprovalService:
         dry-run action 已成功完成，不表示真实危险操作已经执行。
         """
 
-        approval = self.store.get(approval_id)
-        self._require_pending(approval)
+        approval = self.store.claim_for_dry_run(approval_id)
 
-        # 先进入 approved，让 ActionExecutor 能明确拿到“已批准”的审批对象。
-        approval = self.store.update_status(
-            approval_id,
-            ApprovalStatus.APPROVED,
-            decided_at=utc_now(),
-        )
-
-        action_result = self.action_executor.execute(
-            approval.action,
-            approval.args,
-            mode=ActionMode.DRY_RUN,
-            approval=approval,
-        )
-
-        if action_result.status == ActionStatus.SUCCESS:
-            # P12 的 executed 代表 dry-run 执行完成；真实执行仍留给 P13。
-            approval = self.store.update_status(
-                approval_id,
-                ApprovalStatus.EXECUTED,
-                executed_at=utc_now(),
+        try:
+            action_result = self.action_executor.execute(
+                approval.action,
+                approval.args,
+                mode=ActionMode.DRY_RUN,
+                approval=approval,
             )
+        except Exception:
+            self.store.restore_claim(approval_id)
+            raise
+
+        approval = self.store.finalize_action(
+            approval_id=approval_id,
+            action_result=action_result,
+            expected_statuses={ApprovalStatus.APPROVED},
+        )
 
         tool_result = self._tool_result_from_action_result(approval, action_result)
         return approval, tool_result, action_result
@@ -113,12 +122,11 @@ class ApprovalService:
             confirm_real=confirm_real,
         )
 
-        if action_result.status == ActionStatus.SUCCESS:
-            approval = self.store.update_status(
-                approval_id,
-                ApprovalStatus.EXECUTED,
-                executed_at=utc_now(),
-            )
+        approval = self.store.finalize_action(
+            approval_id=approval_id,
+            action_result=action_result,
+            expected_statuses={ApprovalStatus.APPROVED, ApprovalStatus.EXECUTED},
+        )
 
         tool_result = self._tool_result_from_action_result(approval, action_result)
         return approval, tool_result, action_result
@@ -166,13 +174,7 @@ class ApprovalService:
 
 
     def reject(self, approval_id: str) -> Approval:
-        approval = self.store.get(approval_id)
-        self._require_pending(approval)
-        return self.store.update_status(
-            approval_id,
-            ApprovalStatus.REJECTED,
-            decided_at=utc_now(),
-        )
+        return self.store.reject_pending(approval_id)
 
     @staticmethod
     def _require_pending(approval: Approval) -> None:

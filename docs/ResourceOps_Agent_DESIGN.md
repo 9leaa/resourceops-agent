@@ -2260,10 +2260,14 @@ python eval/run_live_smoke.py
 完成标准：
 
 ```bash
-uvicorn app.api:app --host 0.0.0.0 --port 18000
+uvicorn app.api:app --host 0.0.0.0 --port 18000 --workers 1
 ```
 
 然后用 curl 能跑完整 HTTP 诊断和审批流程。
+
+当前 API 的后台 report job 使用进程内线程池和内存 job registry，因此只支持单
+Uvicorn worker。多进程部署需要先引入外部队列或 SQLite job lease，避免一个
+worker 在启动恢复时误处理另一个 worker 正在生成的 report。
 
 ### V1-P6.5：稳定化和 trace 一致性
 

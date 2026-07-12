@@ -6,5 +6,6 @@ services:
     environment:
       RESOURCEOPS_TRACE_DB: /app/var/resourceops.sqlite3
       RESOURCEOPS_APPROVAL_STORE: /app/var/approvals.jsonl
+      RESOURCEOPS_API_WORKERS: "1"
     volumes:
       - ./var:/app/var

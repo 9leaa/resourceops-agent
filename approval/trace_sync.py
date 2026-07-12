@@ -21,11 +21,11 @@ def sync_approval_trace(
     approval: Any,
     action_result: Any | None = None,
 ) -> None:
-    """把 approval/action_result 同步到 TraceStore。
+    """Compatibility sync for older callers that still invoke trace sync.
 
-    approve/reject 的真实状态源是 ApprovalStore；TraceStore 和 workspace 是
-    可查询/可审计视图。P12 起，如果 approve 产生 action_result，也在这里
-    一起写入 trace，并更新 Action execution todo。
+    Phase 2 moves approval transitions into TraceStore transactions. This
+    helper remains idempotent so CLI/API call sites from earlier phases can
+    still refresh derived todos and reports without duplicating action rows.
     """
 
     try:
