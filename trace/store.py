@@ -23,6 +23,7 @@ from app.schemas import (
     TodoStatus,
     utc_now,
 )
+from approval.errors import ApprovalTransitionConflict
 from tools.registry import ToolExecutionResult
 
 if TYPE_CHECKING:
@@ -698,6 +699,102 @@ class TraceStore:
         self._with_connection(connection, write)
         return self.get_approval(approval_id, connection=connection)
 
+    def transition_approval_status(
+        self,
+        approval_id: str,
+        *,
+        expected_statuses: set[ApprovalStatus],
+        next_status: ApprovalStatus,
+        decided_at: Any | None = None,
+        executed_at: Any | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> Approval:
+        """Conditionally move one approval between states.
+
+        This is the concurrency guard for approvals: only a row currently in one
+        of expected_statuses may move. Competing approve/reject requests observe
+        rowcount=0 and fail before ActionExecutor can run twice.
+        """
+
+        if not expected_statuses:
+            raise ValueError("expected_statuses must not be empty")
+
+        expected_values = sorted(status.value for status in expected_statuses)
+        placeholders = ", ".join("?" for _ in expected_values)
+        decided_at_value = decided_at.isoformat() if hasattr(decided_at, "isoformat") else decided_at
+        executed_at_value = executed_at.isoformat() if hasattr(executed_at, "isoformat") else executed_at
+
+        def write(active: sqlite3.Connection) -> None:
+            current = active.execute(
+                "SELECT status FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"approval not found: {approval_id}")
+
+            cursor = active.execute(
+                f"""
+                UPDATE approvals
+                SET status = ?,
+                    decided_at = COALESCE(?, decided_at),
+                    executed_at = COALESCE(?, executed_at)
+                WHERE approval_id = ?
+                  AND status IN ({placeholders})
+                """,
+                (
+                    next_status.value,
+                    decided_at_value,
+                    executed_at_value,
+                    approval_id,
+                    *expected_values,
+                ),
+            )
+            if cursor.rowcount != 1:
+                expected = ", ".join(expected_values)
+                raise ApprovalTransitionConflict(
+                    f"approval {approval_id} is {current['status']}; expected one of: {expected}"
+                )
+
+        self._with_connection(connection, write)
+        return self.get_approval(approval_id, connection=connection)
+
+    def claim_approval_for_dry_run(self, approval_id: str) -> Approval:
+        return self.transition_approval_status(
+            approval_id,
+            expected_statuses={ApprovalStatus.PENDING},
+            next_status=ApprovalStatus.APPROVED,
+            decided_at=utc_now(),
+        )
+
+    def restore_approval_claim(self, approval_id: str) -> Approval:
+        """Undo a dry-run claim after ActionExecutor raises before producing a result."""
+
+        def write(active: sqlite3.Connection) -> None:
+            current = active.execute(
+                "SELECT status FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"approval not found: {approval_id}")
+
+            cursor = active.execute(
+                """
+                UPDATE approvals
+                SET status = ?,
+                    decided_at = NULL
+                WHERE approval_id = ?
+                  AND status = ?
+                """,
+                (ApprovalStatus.PENDING.value, approval_id, ApprovalStatus.APPROVED.value),
+            )
+            if cursor.rowcount != 1:
+                raise ApprovalTransitionConflict(
+                    f"approval {approval_id} is {current['status']}; expected approved"
+                )
+
+        self._with_connection(None, write)
+        return self.get_approval(approval_id)
+
     def save_todo(self, todo: DiagnosisTodo, *, connection: sqlite3.Connection | None = None) -> None:
         payload = todo.model_dump(mode="json")
         def write(active: sqlite3.Connection) -> None:
@@ -1215,6 +1312,83 @@ class TraceStore:
             return
 
         self.update_run_status(run_id, RunStatus.COMPLETED, connection=connection)
+
+    def finalize_approval_action(
+        self,
+        *,
+        approval_id: str,
+        action_result: Any,
+        expected_statuses: set[ApprovalStatus] | None = None,
+    ) -> Approval:
+        """Atomically store an action result and all derived trace state."""
+
+        allowed_statuses = expected_statuses or {ApprovalStatus.APPROVED}
+        with self.transaction() as connection:
+            current = self.get_approval(approval_id, connection=connection)
+            current_status = ApprovalStatus(current.status)
+            if current_status not in allowed_statuses:
+                expected = ", ".join(sorted(status.value for status in allowed_statuses))
+                raise ApprovalTransitionConflict(
+                    f"approval {approval_id} is {current.status}; expected one of: {expected}"
+                )
+
+            action_success = str(action_result.status) == "success"
+            next_status = ApprovalStatus.EXECUTED if action_success else current_status
+            approval = self.transition_approval_status(
+                approval_id,
+                expected_statuses={current_status},
+                next_status=next_status,
+                executed_at=utc_now() if action_success else None,
+                connection=connection,
+            )
+
+            self.save_action_result(approval.run_id, action_result, connection=connection)
+
+            if self._run_exists(approval.run_id, connection=connection):
+                self.sync_action_todos(approval.run_id, action_result, connection=connection)
+
+                approvals = self.list_approvals(run_id=approval.run_id, status=None, connection=connection)
+                self.sync_approval_todos(approval.run_id, approvals, connection=connection)
+                self.update_run_status_from_approvals(
+                    approval.run_id,
+                    approvals,
+                    action_result=action_result,
+                    connection=connection,
+                )
+                self.reconcile_run_report(approval.run_id, connection=connection)
+            return approval
+
+    def reject_pending_approval(self, approval_id: str) -> Approval:
+        with self.transaction() as connection:
+            approval = self.transition_approval_status(
+                approval_id,
+                expected_statuses={ApprovalStatus.PENDING},
+                next_status=ApprovalStatus.REJECTED,
+                decided_at=utc_now(),
+                connection=connection,
+            )
+            if self._run_exists(approval.run_id, connection=connection):
+                approvals = self.list_approvals(run_id=approval.run_id, status=None, connection=connection)
+                self.sync_approval_todos(approval.run_id, approvals, connection=connection)
+                self.update_run_status_from_approvals(
+                    approval.run_id,
+                    approvals,
+                    connection=connection,
+                )
+                self.reconcile_run_report(approval.run_id, connection=connection)
+            return approval
+
+    def _run_exists(
+        self,
+        run_id: str,
+        *,
+        connection: sqlite3.Connection,
+    ) -> bool:
+        row = connection.execute(
+            "SELECT 1 FROM diagnosis_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return row is not None
 
     def apply_approval_transition(
         self,

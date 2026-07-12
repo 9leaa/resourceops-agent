@@ -8,6 +8,7 @@ from pydantic import Field
 from agent.resource_agent import ResourceAgent
 from app.report_jobs import recover_interrupted_report_jobs, submit_report_job
 from approval.service import ApprovalService
+from approval.errors import ApprovalTransitionConflict
 from approval.store import ApprovalStore
 from approval.trace_sync import sync_approval_trace
 from app.schemas import (
@@ -207,6 +208,8 @@ def approve(approval_id: str) -> dict[str, Any]:
         approval, tool_result, action_result = service.approve_with_action_result(approval_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalTransitionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sync_approval_trace(trace_store, approval_store, approval, action_result)
@@ -230,6 +233,8 @@ def execute_real(approval_id: str, request: ExecuteRealRequest) -> dict[str, Any
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalTransitionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -250,6 +255,8 @@ def reject(approval_id: str) -> dict[str, Any]:
         approval = service.reject(approval_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalTransitionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sync_approval_trace(trace_store, approval_store, approval)
