@@ -174,10 +174,10 @@ def test_report_job_exception_sets_failed_status(monkeypatch, tmp_path: Path) ->
     writer = WorkspaceWriter(tmp_path / "runs")
     writer.write_diagnosis_snapshot(snapshot)
 
-    def fail_save_report_snapshot(_report):
+    def fail_finalize_report_snapshot(_report, **_kwargs):
         raise RuntimeError("forced save failure")
 
-    monkeypatch.setattr(trace_store, "save_report_snapshot", fail_save_report_snapshot)
+    monkeypatch.setattr(trace_store, "finalize_report_snapshot", fail_finalize_report_snapshot)
 
     try:
         run_report_job(

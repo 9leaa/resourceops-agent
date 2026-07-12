@@ -398,6 +398,46 @@ class TraceStore:
                 connection=connection,
             )
         
+    def finalize_report_snapshot(
+        self,
+        report: ReportSnapshot,
+        *,
+        report_status: ReportGenerationStatus,
+        report_error: str | None = None,
+        finished_at: Any | None = None,
+    ) -> None:
+        """Atomically store final report content and report generation status."""
+
+        with self.transaction() as connection:
+            for step in report.steps:
+                self.save_step(step, connection=connection)
+            for todo in report.todos:
+                current = self.get_todo(report.run_id, todo.todo_id, connection=connection)
+                if current is not None and should_preserve_todo_state(current):
+                    continue
+                self.save_todo(todo, connection=connection)
+            self.update_run_report(
+                report.run_id,
+                final_report=report.final_report,
+                status=report.run_status,
+                connection=connection,
+            )
+            self.update_report_status(
+                report.run_id,
+                report_status,
+                error=report_error,
+                finished_at=finished_at or utc_now(),
+                connection=connection,
+            )
+
+    def mark_report_failed(self, run_id: str, error: str) -> None:
+        self.update_report_status(
+            run_id,
+            ReportGenerationStatus.FAILED,
+            error=error,
+            finished_at=utc_now(),
+        )
+
 
     @staticmethod
     def _match_tool_step_id(

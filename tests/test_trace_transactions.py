@@ -9,7 +9,14 @@ from actions.executor import ActionMode, ActionResult, ActionStatus
 from agent.resource_agent import ResourceAgent
 from approval.service import ApprovalService
 from approval.store import ApprovalStore
-from app.schemas import Approval, ApprovalStatus, DiagnosisStep, ReportSnapshot, ResourceIncident
+from app.schemas import (
+    Approval,
+    ApprovalStatus,
+    DiagnosisStep,
+    ReportGenerationStatus,
+    ReportSnapshot,
+    ResourceIncident,
+)
 from tests.fixtures import MemoryPressureRegistry
 from trace.store import TraceStore
 
@@ -123,6 +130,46 @@ def test_save_report_snapshot_is_transactional_on_failure(monkeypatch, tmp_path:
 
     trace = trace_store.get_trace(result.run.run_id)
     assert trace["run"]["final_report"] == original_trace["run"]["final_report"]
+    assert all(step["step_id"] != report_step.step_id for step in trace["steps"])
+
+
+def test_finalize_report_snapshot_rolls_back_content_and_status_together(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "trace.sqlite3"
+    trace_store = TraceStore(db_path)
+    result = build_memory_result()
+    result.run.report_status = ReportGenerationStatus.GENERATING
+    trace_store.save_agent_result(result)
+
+    report_step = DiagnosisStep(
+        run_id=result.run.run_id,
+        step_index=999,
+        thought="forced final report step",
+        action="llm_report",
+        observation={"status": "success"},
+        observation_preview="forced final report",
+    )
+    report = ReportSnapshot(
+        run_id=result.run.run_id,
+        final_report="final report should rollback with status",
+        steps=[report_step],
+        todos=result.todos,
+    )
+
+    def fail_update_report_status(*_args, **_kwargs):
+        raise RuntimeError("forced report status failure")
+
+    monkeypatch.setattr(trace_store, "update_report_status", fail_update_report_status)
+
+    original_trace = trace_store.get_trace(result.run.run_id)
+    with pytest.raises(RuntimeError, match="forced report status failure"):
+        trace_store.finalize_report_snapshot(
+            report,
+            report_status=ReportGenerationStatus.READY,
+        )
+
+    trace = trace_store.get_trace(result.run.run_id)
+    assert trace["run"]["final_report"] == original_trace["run"]["final_report"]
+    assert trace["run"]["report_status"] == "generating"
     assert all(step["step_id"] != report_step.step_id for step in trace["steps"])
 
 
