@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.schemas import ApprovalStatus, RunStatus
+from app.schemas import ApprovalStatus
 from approval.store import ApprovalStore
 from trace.store import TraceStore
 
@@ -29,23 +29,9 @@ def sync_approval_trace(
     """
 
     try:
-        trace_store.save_approval(approval)
-
-        if action_result is not None:
-            # action_result 是 P12 的动作审计记录，和 approval 状态分开保存。
-            trace_store.save_action_result(approval.run_id, action_result)
-            trace_store.sync_action_todos(approval.run_id, action_result)
-
-        approvals = approvals_for_run(approval.run_id, approval_store)
-        trace_store.sync_approval_todos(approval.run_id, approvals)
-
-        if not has_pending_approvals(approval.run_id, approval_store):
-            if action_result is not None and str(action_result.status) != "success":
-                # dry-run 失败时不能把 run 标成 completed。
-                trace_store.update_run_status(approval.run_id, RunStatus.FAILED)
-            else:
-                trace_store.update_run_status(approval.run_id, RunStatus.COMPLETED)
-
-        trace_store.reconcile_run_report(approval.run_id)
+        trace_store.apply_approval_transition(
+            approval=approval,
+            action_result=action_result,
+        )
     except KeyError:
         return

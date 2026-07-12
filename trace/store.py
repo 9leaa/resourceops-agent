@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 import json
 import os
 import sqlite3
@@ -73,6 +75,29 @@ class TraceStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _with_connection(
+        self,
+        connection: sqlite3.Connection | None,
+        callback: Callable[[sqlite3.Connection], Any],
+    ) -> Any:
+        if connection is not None:
+            return callback(connection)
+        with self.transaction() as own_connection:
+            return callback(own_connection)
+
     def init_db(self) -> None:
         with self.connect() as connection:
             connection.executescript(
@@ -112,6 +137,7 @@ class TraceStore:
 
                 CREATE TABLE IF NOT EXISTS tool_calls (
                     call_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    call_key TEXT,
                     run_id TEXT NOT NULL,
                     step_id TEXT,
                     tool_name TEXT NOT NULL,
@@ -194,6 +220,7 @@ class TraceStore:
 
                 CREATE TABLE IF NOT EXISTS action_results (
                     action_result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    result_key TEXT,
                     run_id TEXT NOT NULL,
                     approval_id TEXT,
                     action TEXT NOT NULL,
@@ -253,6 +280,24 @@ class TraceStore:
                 "approval_id",
                 "TEXT"
             )
+            self._ensure_column(
+                connection,
+                "tool_calls",
+                "call_key",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "action_results",
+                "result_key",
+                "TEXT",
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_call_key ON tool_calls(call_key)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_action_results_result_key ON action_results(result_key)"
+            )
     @staticmethod
     def _ensure_column(
         connection: sqlite3.Connection,
@@ -268,56 +313,60 @@ class TraceStore:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def save_agent_result(self, result: ResourceAgentResult) -> None:
-        self.save_run(result.run)
-        for step in result.steps:
-            self.save_step(step)
-        used_step_ids: set[str] = set()
-        for tool_result in result.tool_results:
-            step_id = self._match_tool_step_id(result.steps, tool_result.tool_name, used_step_ids)
-            if step_id is not None:
-                used_step_ids.add(step_id)
-            self.save_tool_call(result.run.run_id, step_id, tool_result)
-        for evidence in result.evidence_items:
-            self.save_evidence(evidence)
-        for finding in result.findings:
-            self.save_finding(finding)
-        for approval_data in result.approvals:
-            self.save_approval(Approval.model_validate(approval_data))
-        for todo in result.todos:
-            self.save_todo(todo)
+        with self.transaction() as connection:
+            self.save_run(result.run, connection=connection)
+            for step in result.steps:
+                self.save_step(step, connection=connection)
+            self.save_tool_results(
+                result.run.run_id,
+                result.steps,
+                result.tool_results,
+                connection=connection,
+            )
+            for evidence in result.evidence_items:
+                self.save_evidence(evidence, connection=connection)
+            for finding in result.findings:
+                self.save_finding(finding, connection=connection)
+            for approval_data in result.approvals:
+                self.save_approval(Approval.model_validate(approval_data), connection=connection)
+            for todo in result.todos:
+                self.save_todo(todo, connection=connection)
 
     def save_diagnosis_snapshot(self, snapshot: DiagnosisSnapshot) -> None:
-        self.save_run(snapshot.run)
-        for step in snapshot.steps:
-            self.save_step(step)
-        used_step_ids: set[str] = set()
-        for tool_result in snapshot.tool_results:
-            step_id = self._match_tool_step_id(snapshot.steps, tool_result.tool_name, used_step_ids)
-            if step_id is not None:
-                used_step_ids.add(step_id)
-            self.save_tool_call(snapshot.run.run_id, step_id, tool_result)
-        for evidence in snapshot.evidence_items:
-            self.save_evidence(evidence)
-        for finding in snapshot.findings:
-            self.save_finding(finding)
-        for approval_data in snapshot.approvals:
-            self.save_approval(Approval.model_validate(approval_data))
-        for todo in snapshot.todos:
-            self.save_todo(todo)
+        with self.transaction() as connection:
+            self.save_run(snapshot.run, connection=connection)
+            for step in snapshot.steps:
+                self.save_step(step, connection=connection)
+            self.save_tool_results(
+                snapshot.run.run_id,
+                snapshot.steps,
+                snapshot.tool_results,
+                connection=connection,
+            )
+            for evidence in snapshot.evidence_items:
+                self.save_evidence(evidence, connection=connection)
+            for finding in snapshot.findings:
+                self.save_finding(finding, connection=connection)
+            for approval_data in snapshot.approvals:
+                self.save_approval(Approval.model_validate(approval_data), connection=connection)
+            for todo in snapshot.todos:
+                self.save_todo(todo, connection=connection)
 
     def save_report_snapshot(self, report: ReportSnapshot) -> None:
-        for step in report.steps:
-            self.save_step(step)
-        for todo in report.todos:
-            current = self.get_todo(report.run_id, todo.todo_id)
-            if current is not None and should_preserve_todo_state(current):
-                continue
-            self.save_todo(todo)
-        self.update_run_report(
-            report.run_id,
-            final_report=report.final_report,
-            status=report.run_status,
-        )
+        with self.transaction() as connection:
+            for step in report.steps:
+                self.save_step(step, connection=connection)
+            for todo in report.todos:
+                current = self.get_todo(report.run_id, todo.todo_id, connection=connection)
+                if current is not None and should_preserve_todo_state(current):
+                    continue
+                self.save_todo(todo, connection=connection)
+            self.update_run_report(
+                report.run_id,
+                final_report=report.final_report,
+                status=report.run_status,
+                connection=connection,
+            )
         
 
     @staticmethod
@@ -333,6 +382,21 @@ class TraceStore:
                 return step.step_id
         return None
 
+    def save_tool_results(
+        self,
+        run_id: str,
+        steps: list[DiagnosisStep],
+        tool_results: list[ToolExecutionResult],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        used_step_ids: set[str] = set()
+        for tool_result in tool_results:
+            step_id = self._match_tool_step_id(steps, tool_result.tool_name, used_step_ids)
+            if step_id is not None:
+                used_step_ids.add(step_id)
+            self.save_tool_call(run_id, step_id, tool_result, connection=connection)
+
     @staticmethod
     def _todo_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
@@ -340,10 +404,10 @@ class TraceStore:
         data["depends_on"] = loads(data.pop("depends_on_json"))
         return data
     
-    def save_run(self, run: DiagnosisRun) -> None:
+    def save_run(self, run: DiagnosisRun, *, connection: sqlite3.Connection | None = None) -> None:
         payload = run.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT OR REPLACE INTO diagnosis_runs (
                     run_id, incident_id, status, user_input, resource_type, agent_mode, planner_mode, report_mode,
@@ -356,11 +420,12 @@ class TraceStore:
                 """,
                 payload,
             )
+        self._with_connection(connection, write)
 
-    def save_step(self, step: DiagnosisStep) -> None:
+    def save_step(self, step: DiagnosisStep, *, connection: sqlite3.Connection | None = None) -> None:
         payload = step.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT OR REPLACE INTO diagnosis_steps (
                     step_id, run_id, step_index, thought, action, args_json,
@@ -383,19 +448,40 @@ class TraceStore:
                     payload["created_at"],
                 ),
             )
+        self._with_connection(connection, write)
 
-    def save_tool_call(self, run_id: str, step_id: str | None, result: ToolExecutionResult) -> None:
+    def save_tool_call(
+        self,
+        run_id: str,
+        step_id: str | None,
+        result: ToolExecutionResult,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         payload = result.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        call_key = f"{run_id}:{step_id or payload['tool_name']}:{payload['tool_name']}"
+
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT INTO tool_calls (
-                    run_id, step_id, tool_name, args_json, result_json, preview, summary,
+                    call_key, run_id, step_id, tool_name, args_json, result_json, preview, summary,
                     permission_level, latency_ms, status, error, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(call_key) DO UPDATE SET
+                    args_json = excluded.args_json,
+                    result_json = excluded.result_json,
+                    preview = excluded.preview,
+                    summary = excluded.summary,
+                    permission_level = excluded.permission_level,
+                    latency_ms = excluded.latency_ms,
+                    status = excluded.status,
+                    error = excluded.error,
+                    created_at = excluded.created_at
                 """,
                 (
+                    call_key,
                     run_id,
                     step_id,
                     payload["tool_name"],
@@ -410,11 +496,12 @@ class TraceStore:
                     utc_now().isoformat(),
                 ),
             )
+        self._with_connection(connection, write)
 
-    def save_evidence(self, evidence: EvidenceItem) -> None:
+    def save_evidence(self, evidence: EvidenceItem, *, connection: sqlite3.Connection | None = None) -> None:
         payload = evidence.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT OR REPLACE INTO evidence_items (
                     evidence_id, run_id, source_tool, category, level, message,
@@ -434,11 +521,12 @@ class TraceStore:
                     payload["created_at"],
                 ),
             )
+        self._with_connection(connection, write)
 
-    def save_finding(self, finding: DiagnosisFinding) -> None:
+    def save_finding(self, finding: DiagnosisFinding, *, connection: sqlite3.Connection | None = None) -> None:
         payload = finding.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT OR REPLACE INTO diagnosis_findings (
                     finding_id, run_id, finding_type, title, description,
@@ -458,11 +546,17 @@ class TraceStore:
                     int(payload["requires_approval"]),
                 ),
             )
+        self._with_connection(connection, write)
 
-    def save_approval(self, approval: Approval) -> Approval:
+    def save_approval(
+        self,
+        approval: Approval,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> Approval:
         payload = approval.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT INTO approvals (
                     approval_id, run_id, action, args_json, reason, risk,
@@ -492,14 +586,22 @@ class TraceStore:
                     payload["executed_at"],
                 ),
             )
-        return self.get_approval(approval.approval_id)
+        self._with_connection(connection, write)
+        return self.get_approval(approval.approval_id, connection=connection)
 
-    def get_approval(self, approval_id: str) -> Approval:
-        with self.connect() as connection:
-            row = connection.execute(
+    def get_approval(
+        self,
+        approval_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> Approval:
+        def read(active: sqlite3.Connection) -> sqlite3.Row | None:
+            return active.execute(
                 "SELECT * FROM approvals WHERE approval_id = ?",
                 (approval_id,),
             ).fetchone()
+
+        row = self._with_connection(connection, read)
         if row is None:
             raise KeyError(f"approval not found: {approval_id}")
         return Approval.model_validate(self._approval_to_dict(row))
@@ -508,6 +610,8 @@ class TraceStore:
         self,
         status: str | ApprovalStatus | None = ApprovalStatus.PENDING,
         run_id: str | None = None,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> list[Approval]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -521,11 +625,13 @@ class TraceStore:
             params.append(run_id)
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self.connect() as connection:
-            rows = connection.execute(
+        def read(active: sqlite3.Connection) -> list[sqlite3.Row]:
+            return active.execute(
                 f"SELECT * FROM approvals {where} ORDER BY created_at",
                 params,
             ).fetchall()
+
+        rows = self._with_connection(connection, read)
         return [Approval.model_validate(self._approval_to_dict(row)) for row in rows]
 
     def update_approval_status(
@@ -535,19 +641,20 @@ class TraceStore:
         *,
         decided_at: Any | None = None,
         executed_at: Any | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> Approval:
         decided_at_value = decided_at.isoformat() if hasattr(decided_at, "isoformat") else decided_at
         executed_at_value = executed_at.isoformat() if hasattr(executed_at, "isoformat") else executed_at
 
-        with self.connect() as connection:
-            current = connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            current = active.execute(
                 "SELECT * FROM approvals WHERE approval_id = ?",
                 (approval_id,),
             ).fetchone()
             if current is None:
                 raise KeyError(f"approval not found: {approval_id}")
 
-            connection.execute(
+            active.execute(
                 """
                 UPDATE approvals
                 SET status = ?,
@@ -557,12 +664,13 @@ class TraceStore:
                 """,
                 (status.value, decided_at_value, executed_at_value, approval_id),
             )
-        return self.get_approval(approval_id)
+        self._with_connection(connection, write)
+        return self.get_approval(approval_id, connection=connection)
 
-    def save_todo(self, todo: DiagnosisTodo) -> None:
+    def save_todo(self, todo: DiagnosisTodo, *, connection: sqlite3.Connection | None = None) -> None:
         payload = todo.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT OR REPLACE INTO diagnosis_todos (
                     todo_id, run_id, todo_index, title, status, level, parent_todo_id,
@@ -595,13 +703,22 @@ class TraceStore:
                     payload["updated_at"],
                 ),
             )
+        self._with_connection(connection, write)
 
-    def get_todo(self, run_id: str, todo_id: str) -> DiagnosisTodo | None:
-        with self.connect() as connection:
-            row = connection.execute(
+    def get_todo(
+        self,
+        run_id: str,
+        todo_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> DiagnosisTodo | None:
+        def read(active: sqlite3.Connection) -> sqlite3.Row | None:
+            return active.execute(
                 "SELECT * FROM diagnosis_todos WHERE run_id = ? AND todo_id = ?",
                 (run_id, todo_id),
             ).fetchone()
+
+        row = self._with_connection(connection, read)
         return DiagnosisTodo.model_validate(self._todo_to_dict(row)) if row is not None else None
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -617,10 +734,17 @@ class TraceStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def update_run_status(self, run_id: str, status: RunStatus, ended_at: str | None = None) -> None:
+    def update_run_status(
+        self,
+        run_id: str,
+        status: RunStatus,
+        ended_at: str | None = None,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         ended_at = ended_at or utc_now().isoformat()
-        with self.connect() as connection:
-            cursor = connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            cursor = active.execute(
                 """
                 UPDATE diagnosis_runs
                 SET status = ?, ended_at = ?
@@ -630,6 +754,7 @@ class TraceStore:
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"run not found: {run_id}")
+        self._with_connection(connection, write)
 
     def update_run_report(
         self,
@@ -638,10 +763,11 @@ class TraceStore:
         final_report: str,
         status: RunStatus,
         ended_at: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         ended_at = ended_at or utc_now().isoformat()
-        with self.connect() as connection:
-            current = connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            current = active.execute(
                 "SELECT status FROM diagnosis_runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
@@ -650,7 +776,7 @@ class TraceStore:
 
             current_status = str(current["status"])
             next_status = current_status if current_status in {"completed", "failed"} else schema_value(status)
-            connection.execute(
+            active.execute(
                 """
                 UPDATE diagnosis_runs
                 SET final_report = ?, status = ?, ended_at = ?
@@ -658,11 +784,17 @@ class TraceStore:
                 """,
                 (final_report, next_status, ended_at, run_id),
             )
+        self._with_connection(connection, write)
 
-    def reconcile_run_report(self, run_id: str) -> None:
+    def reconcile_run_report(
+        self,
+        run_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         """Refresh final_report dynamic sections from the latest trace state."""
 
-        trace = self.get_trace(run_id)
+        trace = self.get_trace(run_id, connection=connection)
         final_report = trace.get("run", {}).get("final_report")
         if not final_report:
             return
@@ -673,8 +805,8 @@ class TraceStore:
         if reconciled == final_report:
             return
 
-        with self.connect() as connection:
-            connection.execute(
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 UPDATE diagnosis_runs
                 SET final_report = ?
@@ -682,33 +814,39 @@ class TraceStore:
                 """,
                 (reconciled, run_id),
             )
+        self._with_connection(connection, write)
 
-    def get_trace(self, run_id: str) -> dict[str, Any]:
-        with self.connect() as connection:
-            run = connection.execute("SELECT * FROM diagnosis_runs WHERE run_id = ?", (run_id,)).fetchone()
+    def get_trace(
+        self,
+        run_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        def read(active: sqlite3.Connection) -> dict[str, Any]:
+            run = active.execute("SELECT * FROM diagnosis_runs WHERE run_id = ?", (run_id,)).fetchone()
             if run is None:
                 raise KeyError(f"run not found: {run_id}")
-            steps = connection.execute(
+            steps = active.execute(
                 "SELECT * FROM diagnosis_steps WHERE run_id = ? ORDER BY step_index",
                 (run_id,),
             ).fetchall()
-            tool_calls = connection.execute(
+            tool_calls = active.execute(
                 "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY call_id",
                 (run_id,),
             ).fetchall()
-            evidence = connection.execute(
+            evidence = active.execute(
                 "SELECT * FROM evidence_items WHERE run_id = ? ORDER BY created_at",
                 (run_id,),
             ).fetchall()
-            findings = connection.execute(
+            findings = active.execute(
                 "SELECT * FROM diagnosis_findings WHERE run_id = ? ORDER BY finding_id",
                 (run_id,),
             ).fetchall()
-            approvals = connection.execute(
+            approvals = active.execute(
                 "SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at",
                 (run_id,),
             ).fetchall()
-            todos = connection.execute(
+            todos = active.execute(
                 """
                 SELECT * FROM diagnosis_todos
                 WHERE run_id = ?
@@ -716,24 +854,32 @@ class TraceStore:
                 """,
                 (run_id,),
             ).fetchall()
-            action_results = connection.execute(
+            action_results = active.execute(
                 "SELECT * FROM action_results WHERE run_id = ? ORDER BY action_result_id",
                 (run_id,),
             ).fetchall()
 
-        return {
-            "run": dict(run),
-            "steps": [self._step_to_dict(row) for row in steps],
-            "tool_calls": [self._tool_call_to_dict(row) for row in tool_calls],
-            "evidence_items": [self._evidence_to_dict(row) for row in evidence],
-            "findings": [self._finding_to_dict(row) for row in findings],
-            "approvals": [self._approval_to_dict(row) for row in approvals],
-            "todos": [self._todo_to_dict(row) for row in todos],
-            "action_results": [self._action_result_to_dict(row) for row in action_results],
-        }
-    def list_todos(self, run_id: str) -> list[DiagnosisTodo]:
-        with self.connect() as connection:
-            rows = connection.execute(
+            return {
+                "run": dict(run),
+                "steps": [self._step_to_dict(row) for row in steps],
+                "tool_calls": [self._tool_call_to_dict(row) for row in tool_calls],
+                "evidence_items": [self._evidence_to_dict(row) for row in evidence],
+                "findings": [self._finding_to_dict(row) for row in findings],
+                "approvals": [self._approval_to_dict(row) for row in approvals],
+                "todos": [self._todo_to_dict(row) for row in todos],
+                "action_results": [self._action_result_to_dict(row) for row in action_results],
+            }
+
+        return self._with_connection(connection, read)
+
+    def list_todos(
+        self,
+        run_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> list[DiagnosisTodo]:
+        def read(active: sqlite3.Connection) -> list[sqlite3.Row]:
+            return active.execute(
                 """
                 SELECT * FROM diagnosis_todos
                 WHERE run_id = ?
@@ -741,9 +887,18 @@ class TraceStore:
                 """,
                 (run_id,),
             ).fetchall()
+
+        rows = self._with_connection(connection, read)
         return [DiagnosisTodo.model_validate(self._todo_to_dict(row)) for row in rows]
-    def sync_approval_todos(self, run_id: str, approvals: list[Approval]) -> None:
-        todos = self.list_todos(run_id)
+
+    def sync_approval_todos(
+        self,
+        run_id: str,
+        approvals: list[Approval],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        todos = self.list_todos(run_id, connection=connection)
         if not todos:
             return
 
@@ -776,7 +931,7 @@ class TraceStore:
                             "updated_at": utc_now(),
                         }
                     )
-                self.save_todo(todo)
+                self.save_todo(todo, connection=connection)
                 continue
 
             if todo.source != "approval" or not todo.approval_id:
@@ -814,23 +969,43 @@ class TraceStore:
                     }
                 )
 
-            self.save_todo(todo)
+            self.save_todo(todo, connection=connection)
     
-    def save_action_result(self, run_id: str, result: Any) -> None:
+    def save_action_result(
+        self,
+        run_id: str,
+        result: Any,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         """保存 P12 ActionExecutor 产生的 dry-run 结果。"""
 
         payload = result.model_dump(mode="json")
-        with self.connect() as connection:
-            connection.execute(
+        result_key = (
+            f"{run_id}:{payload['approval_id']}:{payload['action']}:"
+            f"{payload['mode']}:{payload['created_at']}"
+        )
+
+        def write(active: sqlite3.Connection) -> None:
+            active.execute(
                 """
                 INSERT INTO action_results (
-                    run_id, approval_id, action, mode, status, args_json,
+                    result_key, run_id, approval_id, action, mode, status, args_json,
                     pre_check_json, execution_json, post_check_json,
                     preview, error, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(result_key) DO UPDATE SET
+                    status = excluded.status,
+                    args_json = excluded.args_json,
+                    pre_check_json = excluded.pre_check_json,
+                    execution_json = excluded.execution_json,
+                    post_check_json = excluded.post_check_json,
+                    preview = excluded.preview,
+                    error = excluded.error
                 """,
                 (
+                    result_key,
                     run_id,
                     payload["approval_id"],
                     payload["action"],
@@ -845,15 +1020,22 @@ class TraceStore:
                     payload["created_at"],
                 ),
             )
+        self._with_connection(connection, write)
 
-    def sync_action_todos(self, run_id: str, action_result: Any) -> None:
+    def sync_action_todos(
+        self,
+        run_id: str,
+        action_result: Any,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         """根据 ActionResult 更新 Action execution 阶段和小任务。
 
         Approval task 表示“人是否批准”；Action task 表示“批准后的动作 dry-run
         是否完成”。这两个状态需要分开，避免把审批完成误解成动作完成。
         """
 
-        todos = self.list_todos(run_id)
+        todos = self.list_todos(run_id, connection=connection)
         if not todos:
             return
 
@@ -880,7 +1062,7 @@ class TraceStore:
                 "updated_at": utc_now(),
                 }
         )
-        self.save_todo(action_phase)
+        self.save_todo(action_phase, connection=connection)
 
         existing = next(
             (
@@ -930,11 +1112,51 @@ class TraceStore:
                 }
             )
 
-        self.save_todo(existing)
+        self.save_todo(existing, connection=connection)
 
 
 
 
+
+    def update_run_status_from_approvals(
+        self,
+        run_id: str,
+        approvals: list[Approval],
+        *,
+        action_result: Any | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        if any(approval.status == ApprovalStatus.PENDING for approval in approvals):
+            return
+
+        if action_result is not None and str(action_result.status) != "success":
+            self.update_run_status(run_id, RunStatus.FAILED, connection=connection)
+            return
+
+        self.update_run_status(run_id, RunStatus.COMPLETED, connection=connection)
+
+    def apply_approval_transition(
+        self,
+        *,
+        approval: Approval,
+        action_result: Any | None = None,
+    ) -> None:
+        with self.transaction() as connection:
+            self.save_approval(approval, connection=connection)
+
+            if action_result is not None:
+                self.save_action_result(approval.run_id, action_result, connection=connection)
+                self.sync_action_todos(approval.run_id, action_result, connection=connection)
+
+            approvals = self.list_approvals(run_id=approval.run_id, status=None, connection=connection)
+            self.sync_approval_todos(approval.run_id, approvals, connection=connection)
+            self.update_run_status_from_approvals(
+                approval.run_id,
+                approvals,
+                action_result=action_result,
+                connection=connection,
+            )
+            self.reconcile_run_report(approval.run_id, connection=connection)
 
     @staticmethod
     def _step_to_dict(row: sqlite3.Row) -> dict[str, Any]:
