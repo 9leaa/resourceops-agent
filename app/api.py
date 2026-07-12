@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, status
@@ -31,7 +32,30 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 def recover_report_jobs_on_startup() -> None:
+    warn_if_multiple_api_workers()
     recover_interrupted_report_jobs(build_trace_store())
+
+
+def configured_api_worker_count() -> int | None:
+    for name in ("RESOURCEOPS_API_WORKERS", "WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning("invalid API worker count", extra={"env_var": name, "value": raw})
+            return None
+    return None
+
+
+def warn_if_multiple_api_workers() -> None:
+    worker_count = configured_api_worker_count()
+    if worker_count is not None and worker_count > 1:
+        logger.warning(
+            "in-process report jobs only support a single API worker",
+            extra={"worker_count": worker_count},
+        )
 
 
 class DiagnoseRequest(StrictBaseModel):

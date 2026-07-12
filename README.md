@@ -268,8 +268,14 @@ python scripts/stress_gpu_memory.py --mb 512 --duration 10 --yes
 ## FastAPI
 
 ```bash
-uvicorn app.api:app --host 0.0.0.0 --port 18000
+uvicorn app.api:app --host 0.0.0.0 --port 18000 --workers 1
 ```
+
+The current FastAPI service uses in-process report jobs and an in-memory job
+registry. Run it with a single API worker. `RESOURCEOPS_REPORT_WORKERS` only
+controls report threads inside that one process; it is not a Uvicorn worker
+count. Multi-process API serving needs an external job queue or a SQLite-backed
+job lease before it is safe.
 
 HTTP diagnosis:
 

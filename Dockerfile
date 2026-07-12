@@ -15,4 +15,4 @@ RUN mkdir -p /app/var
 
 EXPOSE 18000
 
-CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "18000"]
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "18000", "--workers", "1"]
