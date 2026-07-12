@@ -106,6 +106,7 @@ class TodoStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    APPROVAL_DETECTED = "approval_detected"
     WAITING_APPROVAL = "waiting_approval"
 
 class TodoLevel(str, Enum):
@@ -635,3 +636,37 @@ class ResourceAgentResult(StrictBaseModel):
     requires_approval: bool = False
     approvals: list[dict[str, Any]] = Field(default_factory=list)
     todos: list[DiagnosisTodo] = Field(default_factory=list)
+
+
+class DiagnosisSnapshot(StrictBaseModel):
+    """报告生成前已经完成的确定性诊断快照。
+
+    这个对象包含审批所需的全部确定性数据。LLM report 可以在它之后单独生成，
+    因此 Approval 不再依赖自然语言报告完成。
+    """
+
+    incident: ResourceIncident
+    run: DiagnosisRun
+    tool_plan: ToolPlan | None = None
+    steps: list[DiagnosisStep] = Field(default_factory=list)
+    tool_results: list[Any] = Field(default_factory=list)
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    findings: list[DiagnosisFinding] = Field(default_factory=list)
+    requires_approval: bool = False
+    approvals: list[dict[str, Any]] = Field(default_factory=list)
+    todos: list[DiagnosisTodo] = Field(default_factory=list)
+
+
+class ReportSnapshot(StrictBaseModel):
+    """诊断快照之后生成的报告结果。"""
+
+    run_id: str
+    final_report: str
+    report_mode: ReportMode = ReportMode.TEMPLATE
+    source: str = "deterministic"
+    status: str = "success"
+    run_status: RunStatus = RunStatus.COMPLETED
+    latency_ms: int = Field(default=0, ge=0)
+    steps: list[DiagnosisStep] = Field(default_factory=list)
+    todos: list[DiagnosisTodo] = Field(default_factory=list)
+    llm_call: dict[str, Any] | None = None

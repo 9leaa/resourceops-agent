@@ -31,7 +31,7 @@ def test_workspace_steps_are_compact_and_reference_raw_artifacts(tmp_path) -> No
     assert all("observation_preview" in step for step in steps)
 
 
-def test_action_refresh_creates_remediation_summary_without_overwriting_report(tmp_path) -> None:
+def test_action_refresh_creates_remediation_summary_and_reconciles_report(tmp_path) -> None:
     trace_store = TraceStore(tmp_path / "trace.sqlite3")
     approval_store = ApprovalStore(tmp_path / "approvals.jsonl")
     approval_service = ApprovalService(store=approval_store)
@@ -51,9 +51,12 @@ def test_action_refresh_creates_remediation_summary_without_overwriting_report(t
     writer.update_from_trace(result.run.run_id, trace_store)
 
     remediation = (run_dir / "remediation_summary.md").read_text(encoding="utf-8")
+    refreshed_report = (run_dir / "report.md").read_text(encoding="utf-8")
     summary = read_json(run_dir / "summary" / "run_summary.json")
     assert "Mode: dry_run" in remediation
     assert "Changed system state: False" in remediation
-    assert (run_dir / "report.md").read_text(encoding="utf-8") == original_report
+    assert refreshed_report != original_report
+    assert "status=executed" in refreshed_report
+    assert "dry_run=success" in refreshed_report
     assert summary["remediation_summary_available"] is True
     assert "report_generated_before_action_execution" in summary["warnings"]

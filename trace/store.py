@@ -6,11 +6,24 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.schemas import Approval, DiagnosisFinding, DiagnosisRun, DiagnosisStep, EvidenceItem, RunStatus, utc_now,DiagnosisTodo,ApprovalStatus, TodoDisplayGroup, TodoLevel, TodoStatus
+from app.schemas import (
+    Approval,
+    ApprovalStatus,
+    DiagnosisFinding,
+    DiagnosisRun,
+    DiagnosisStep,
+    DiagnosisTodo,
+    EvidenceItem,
+    RunStatus,
+    TodoDisplayGroup,
+    TodoLevel,
+    TodoStatus,
+    utc_now,
+)
 from tools.registry import ToolExecutionResult
 
 if TYPE_CHECKING:
-    from app.schemas import ResourceAgentResult
+    from app.schemas import DiagnosisSnapshot, ReportSnapshot, ResourceAgentResult
 
 
 DEFAULT_TRACE_DB = Path(__file__).resolve().parents[1] / "var" / "resourceops.sqlite3"
@@ -30,6 +43,23 @@ def loads(value: str | None) -> Any:
     if value is None:
         return None
     return json.loads(value)
+
+
+def schema_value(value: object) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw) if raw is not None else ""
+
+
+def should_preserve_todo_state(todo: DiagnosisTodo) -> bool:
+    group = schema_value(todo.display_group)
+    status = schema_value(todo.status)
+    if group not in {TodoDisplayGroup.APPROVAL.value, TodoDisplayGroup.ACTIONS.value}:
+        return False
+    return status in {
+        TodoStatus.COMPLETED.value,
+        TodoStatus.FAILED.value,
+        TodoStatus.SKIPPED.value,
+    }
 
 
 class TraceStore:
@@ -255,6 +285,39 @@ class TraceStore:
             self.save_approval(Approval.model_validate(approval_data))
         for todo in result.todos:
             self.save_todo(todo)
+
+    def save_diagnosis_snapshot(self, snapshot: DiagnosisSnapshot) -> None:
+        self.save_run(snapshot.run)
+        for step in snapshot.steps:
+            self.save_step(step)
+        used_step_ids: set[str] = set()
+        for tool_result in snapshot.tool_results:
+            step_id = self._match_tool_step_id(snapshot.steps, tool_result.tool_name, used_step_ids)
+            if step_id is not None:
+                used_step_ids.add(step_id)
+            self.save_tool_call(snapshot.run.run_id, step_id, tool_result)
+        for evidence in snapshot.evidence_items:
+            self.save_evidence(evidence)
+        for finding in snapshot.findings:
+            self.save_finding(finding)
+        for approval_data in snapshot.approvals:
+            self.save_approval(Approval.model_validate(approval_data))
+        for todo in snapshot.todos:
+            self.save_todo(todo)
+
+    def save_report_snapshot(self, report: ReportSnapshot) -> None:
+        for step in report.steps:
+            self.save_step(step)
+        for todo in report.todos:
+            current = self.get_todo(report.run_id, todo.todo_id)
+            if current is not None and should_preserve_todo_state(current):
+                continue
+            self.save_todo(todo)
+        self.update_run_report(
+            report.run_id,
+            final_report=report.final_report,
+            status=report.run_status,
+        )
         
 
     @staticmethod
@@ -457,6 +520,14 @@ class TraceStore:
                     payload["updated_at"],
                 ),
             )
+
+    def get_todo(self, run_id: str, todo_id: str) -> DiagnosisTodo | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM diagnosis_todos WHERE run_id = ? AND todo_id = ?",
+                (run_id, todo_id),
+            ).fetchone()
+        return DiagnosisTodo.model_validate(self._todo_to_dict(row)) if row is not None else None
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -484,6 +555,58 @@ class TraceStore:
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"run not found: {run_id}")
+
+    def update_run_report(
+        self,
+        run_id: str,
+        *,
+        final_report: str,
+        status: RunStatus,
+        ended_at: str | None = None,
+    ) -> None:
+        ended_at = ended_at or utc_now().isoformat()
+        with self.connect() as connection:
+            current = connection.execute(
+                "SELECT status FROM diagnosis_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"run not found: {run_id}")
+
+            current_status = str(current["status"])
+            next_status = current_status if current_status in {"completed", "failed"} else schema_value(status)
+            connection.execute(
+                """
+                UPDATE diagnosis_runs
+                SET final_report = ?, status = ?, ended_at = ?
+                WHERE run_id = ?
+                """,
+                (final_report, next_status, ended_at, run_id),
+            )
+
+    def reconcile_run_report(self, run_id: str) -> None:
+        """Refresh final_report dynamic sections from the latest trace state."""
+
+        trace = self.get_trace(run_id)
+        final_report = trace.get("run", {}).get("final_report")
+        if not final_report:
+            return
+
+        from agent.report_reconcile import reconcile_report_text_with_trace
+
+        reconciled = reconcile_report_text_with_trace(str(final_report), trace)
+        if reconciled == final_report:
+            return
+
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE diagnosis_runs
+                SET final_report = ?
+                WHERE run_id = ?
+                """,
+                (reconciled, run_id),
+            )
 
     def get_trace(self, run_id: str) -> dict[str, Any]:
         with self.connect() as connection:

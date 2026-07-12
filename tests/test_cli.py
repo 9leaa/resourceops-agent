@@ -277,6 +277,7 @@ def test_rich_todo_panel_keeps_tool_and_action_sections(tmp_path) -> None:
 
     assert "Tool execution" in output
     assert "get_memory_snapshot" in output
+    assert "Report" in output
     assert "Approval" in output
     assert "kill_process" in output
     assert "Action execution" in output
@@ -314,6 +315,27 @@ def test_approval_prompt_pauses_live_without_printing_task_panel(monkeypatch) ->
     assert choice == "r"
     assert sink.pause_calls == [False]
     assert sink.resume_calls == 1
+
+
+def test_approval_prompt_requires_explicit_choice(monkeypatch, capsys) -> None:
+    choices = iter(["", "s"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(choices))
+
+    choice = ask_approval_choice(
+        1,
+        1,
+        {
+            "approval_id": "appr_test",
+            "action": "kill_process",
+            "risk": "dangerous",
+            "reason": "test",
+            "args": {"pid": 123},
+        },
+    )
+
+    captured = capsys.readouterr()
+    assert choice == "s"
+    assert "请输入明确选择" in captured.out
 
 
 def test_workspace_cli_prints_file_list(monkeypatch, tmp_path, capsys) -> None:

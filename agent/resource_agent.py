@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent.detectors import run_detectors
 from agent.llm_client import LlmClient, build_default_llm_client_from_env
@@ -16,14 +16,17 @@ from agent.tool_catalog import build_tool_catalog
 from approval.service import ApprovalService
 from app.schemas import (
     AgentPlannerMode,
+    DiagnosisSnapshot,
     DiagnosisFinding,
     DiagnosisRun,
     DiagnosisStep,
     EvidenceItem,
     Recommendation,
+    ReportSnapshot,
     ReportMode,
     ResourceAgentResult,
     ResourceIncident,
+    ResourceType,
     RunStatus,
     TodoDisplayGroup,
     utc_now,
@@ -31,6 +34,7 @@ from app.schemas import (
 from tools.registry import ToolExecutionResult, ToolRegistry, default_registry
 from agent.todos import (
     build_phase_todos,
+    mark_todo_approval_detected,
     mark_todo_completed,
     mark_todo_failed,
     mark_todo_running,
@@ -100,7 +104,19 @@ class ResourceAgent:
         self.event_sink = event_sink or NoopAgentEventSink()
 
     def diagnose(self, incident: ResourceIncident) -> ResourceAgentResult:
-        """核心诊断方法incident -> agentresult"""
+        """兼容旧调用方的一步式诊断入口。"""
+
+        snapshot = self.collect_and_detect(incident)
+        report = self.generate_report(snapshot)
+        return self.result_from_snapshots(snapshot, report)
+
+    def collect_and_detect(self, incident: ResourceIncident) -> DiagnosisSnapshot:
+        """执行确定性诊断阶段，生成审批所需的完整快照。
+
+        这个阶段不生成 LLM report，因此 Approval 可以在 report 尚未完成时
+        先持久化并进入交互审批。
+        """
+
         #infer_resource_type支持用户指定类型
         #resourceops diagnose "GPU 显存占用过高" --resource-type gpu
         resource_type = infer_resource_type(incident.description, incident.resource_type)
@@ -268,35 +284,95 @@ class ResourceAgent:
             start_index=len(tool_todos),
             )
         if approval_todos:
+            approval_todos = [
+                mark_todo_approval_detected(todo, f"approval detected: {todo.approval_id}")
+                for todo in approval_todos
+            ]
             self.event_sink.on_todo_snapshot(tool_todos + approval_todos)
 
         phase_index, phase = phase_by_group(phases, TodoDisplayGroup.REPORT)
         phases[phase_index] = mark_todo_running(phase)
         self.event_sink.on_phase_updated(phases[phase_index], phases)
 
-        deterministic_report = build_p4_report(
-            description=incident.description,
-            resource_type=resource_type,
+        phase_index, phase = phase_by_group(phases, TodoDisplayGroup.APPROVAL)
+        if approvals:
+            phases[phase_index] = mark_todo_approval_detected(phase, f"{len(approvals)} approval(s) detected")
+        else:
+            phases[phase_index] = mark_todo_completed(phase, "no approvals")
+        self.event_sink.on_phase_updated(phases[phase_index], phases)
+
+        phase_index, phase = phase_by_group(phases, TodoDisplayGroup.ACTIONS)
+        phases[phase_index] = mark_todo_skipped(phase, "reserved for action executor")
+        self.event_sink.on_phase_updated(phases[phase_index], phases)
+
+        run.status = RunStatus.WAITING_APPROVAL if approvals else RunStatus.RUNNING
+        run.root_cause = summarize_root_cause(findings)
+        run.summary = (
+            f"Executed {count_phrase(len(tool_results), 'resource tool')} for {resource_type.value}; "
+            f"detected {count_phrase(len(findings), 'finding')}, "
+            f"{count_phrase(len(evidence_items), 'evidence item')}, "
+            f"and {count_phrase(len(approvals), 'approval')}."
+        )
+
+        return DiagnosisSnapshot(
+            incident=incident,
+            run=run,
+            tool_plan=tool_plan,
             steps=steps,
             tool_results=tool_results,
             evidence_items=evidence_items,
             findings=findings,
+            requires_approval=bool(approvals),
             approvals=approvals,
+            todos=phases + tool_todos + approval_todos,
+        )
+
+    def generate_report(
+        self,
+        snapshot: DiagnosisSnapshot,
+        *,
+        emit_events: bool = True,
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> ReportSnapshot:
+        """基于诊断快照生成报告。"""
+
+        resource_type = ResourceType(snapshot.run.resource_type)
+        steps: list[DiagnosisStep] = []
+        todos = list(snapshot.todos)
+        phases = [todo for todo in todos if normalize_enum(todo.level) == "phase"]
+
+        phase_index, phase = phase_by_group(phases, TodoDisplayGroup.REPORT)
+        phases[phase_index] = mark_todo_running(phase)
+        if emit_events:
+            self.event_sink.on_phase_updated(phases[phase_index], phases)
+
+        deterministic_report = build_p4_report(
+            description=snapshot.incident.description,
+            resource_type=resource_type,
+            steps=snapshot.steps,
+            tool_results=snapshot.tool_results,
+            evidence_items=snapshot.evidence_items,
+            findings=snapshot.findings,
+            approvals=snapshot.approvals,
         )
         final_report = deterministic_report
+        source = "deterministic"
+        status = "success"
+        latency_ms = 0
+        llm_call: dict[str, Any] | None = None
         if self.report_mode == ReportMode.LLM:
             report_context = build_report_context(
-                description=incident.description,
+                description=snapshot.incident.description,
                 resource_type=resource_type,
-                tool_results=tool_results,
-                evidence_items=evidence_items,
-                findings=findings,
-                approvals=approvals,
+                tool_results=snapshot.tool_results,
+                evidence_items=snapshot.evidence_items,
+                findings=snapshot.findings,
+                approvals=snapshot.approvals,
             )
             steps.append(
                 DiagnosisStep(
-                    run_id=run.run_id,
-                    step_index=len(steps),
+                    run_id=snapshot.run.run_id,
+                    step_index=len(snapshot.steps) + len(steps),
                     thought="Build a bounded, redacted report context from tool results for LLM report writing.",
                     action="build_report_context",
                     args={
@@ -311,20 +387,25 @@ class ResourceAgent:
             )
             llm_report_result = build_llm_report_result(
                 deterministic_report=deterministic_report,
-                description=incident.description,
+                description=snapshot.incident.description,
                 resource_type=resource_type,
-                tool_results=tool_results,
-                evidence_items=evidence_items,
-                findings=findings,
-                approvals=approvals,
+                tool_results=snapshot.tool_results,
+                evidence_items=snapshot.evidence_items,
+                findings=snapshot.findings,
+                approvals=snapshot.approvals,
                 llm_client=self.llm_client,
                 report_context=report_context,
+                stream_callback=stream_callback,
             )
             final_report = llm_report_result.final_report
+            source = llm_report_result.source
+            status = llm_report_result.status
+            latency_ms = llm_report_result.latency_ms
+            llm_call = llm_report_result.llm_call
             steps.append(
                 DiagnosisStep(
-                    run_id=run.run_id,
-                    step_index=len(steps),
+                    run_id=snapshot.run.run_id,
+                    step_index=len(snapshot.steps) + len(steps),
                     thought="Rewrite the deterministic diagnosis report with an LLM using only existing evidence, findings, recommendations, and approvals.",
                     action="llm_report",
                     args={
@@ -346,51 +427,62 @@ class ResourceAgent:
 
         phase_index, phase = phase_by_group(phases, TodoDisplayGroup.REPORT)
         phases[phase_index] = mark_todo_completed(phase, report_preview)
-        self.event_sink.on_phase_updated(phases[phase_index], phases)
+        if emit_events:
+            self.event_sink.on_phase_updated(phases[phase_index], phases)
 
         phase_index, phase = phase_by_group(phases, TodoDisplayGroup.APPROVAL)
-        if approvals:
-            phases[phase_index] = mark_todo_waiting_approval(phase, f"{len(approvals)} approval(s) pending")
+        if snapshot.approvals:
+            phases[phase_index] = mark_todo_waiting_approval(phase, f"{len(snapshot.approvals)} approval(s) pending")
         else:
             phases[phase_index] = mark_todo_completed(phase, "no approvals")
-        self.event_sink.on_phase_updated(phases[phase_index], phases)
+        if emit_events:
+            self.event_sink.on_phase_updated(phases[phase_index], phases)
 
-        phase_index, phase = phase_by_group(phases, TodoDisplayGroup.ACTIONS)
-        phases[phase_index] = mark_todo_skipped(phase, "reserved for action executor")
-        self.event_sink.on_phase_updated(phases[phase_index], phases)
+        tasks = [todo for todo in todos if normalize_enum(todo.level) != "phase"]
+        if snapshot.approvals:
+            tasks = [
+                mark_todo_waiting_approval(todo, f"pending approval: {todo.approval_id}")
+                if todo.source == "approval"
+                else todo
+                for todo in tasks
+            ]
 
-        run.status = RunStatus.WAITING_APPROVAL if approvals else RunStatus.COMPLETED
-        run.final_report = final_report
-        run.root_cause = summarize_root_cause(findings)
-        run.summary = (
-            f"Executed {count_phrase(len(tool_results), 'resource tool')} for {resource_type.value}; "
-            f"detected {count_phrase(len(findings), 'finding')}, "
-            f"{count_phrase(len(evidence_items), 'evidence item')}, "
-            f"and {count_phrase(len(approvals), 'approval')}."
+        return ReportSnapshot(
+            run_id=snapshot.run.run_id,
+            final_report=final_report,
+            report_mode=self.report_mode,
+            source=source,
+            status=status,
+            run_status=RunStatus.WAITING_APPROVAL if snapshot.approvals else RunStatus.COMPLETED,
+            latency_ms=latency_ms,
+            steps=steps,
+            todos=phases + tasks,
+            llm_call=llm_call,
         )
-        run.ended_at = utc_now()
 
-        """
-        finding.requires_approval=True
-        ↓
-        _create_approvals()
-        ↓
-        有 approvals
-        ↓
-        run.status = waiting_approval
-        """
-
+    def result_from_snapshots(
+        self,
+        snapshot: DiagnosisSnapshot,
+        report: ReportSnapshot,
+    ) -> ResourceAgentResult:
+        run = snapshot.run.model_copy(
+            update={
+                "status": report.run_status,
+                "final_report": report.final_report,
+                "ended_at": utc_now(),
+            }
+        )
         return ResourceAgentResult(
             run=run,
-            tool_plan=tool_plan,
-            steps=steps,
-            tool_results=tool_results,
-            evidence_items=evidence_items,
-            findings=findings,
-            final_report=final_report,
-            requires_approval=bool(approvals),
-            approvals=approvals,
-            todos=phases + tool_todos + approval_todos,
+            tool_plan=snapshot.tool_plan,
+            steps=snapshot.steps + report.steps,
+            tool_results=snapshot.tool_results,
+            evidence_items=snapshot.evidence_items,
+            findings=snapshot.findings,
+            final_report=report.final_report,
+            requires_approval=snapshot.requires_approval,
+            approvals=snapshot.approvals,
+            todos=report.todos or snapshot.todos,
         )
 
     def _prepare_workspace(self, run_id: str) -> None:
@@ -506,3 +598,8 @@ def compose_agent_mode(planner_mode: AgentPlannerMode, report_mode: ReportMode) 
     if planner_mode == AgentPlannerMode.LLM and report_mode == ReportMode.LLM:
         return "llm_full"
     raise ValueError(f"unsupported mode combination: planner={planner_mode}, report={report_mode}")
+
+
+def normalize_enum(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw) if raw is not None else ""

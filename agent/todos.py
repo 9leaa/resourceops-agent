@@ -100,5 +100,9 @@ def mark_todo_skipped(todo: DiagnosisTodo, result_preview: str | None = None) ->
     return todo.model_copy(update={"status": TodoStatus.SKIPPED, "result_preview": result_preview, "updated_at": utc_now()})
 
 
+def mark_todo_approval_detected(todo: DiagnosisTodo, result_preview: str | None = None) -> DiagnosisTodo:
+    return todo.model_copy(update={"status": TodoStatus.APPROVAL_DETECTED, "result_preview": result_preview, "updated_at": utc_now()})
+
+
 def mark_todo_waiting_approval(todo: DiagnosisTodo, result_preview: str | None = None) -> DiagnosisTodo:
     return todo.model_copy(update={"status": TodoStatus.WAITING_APPROVAL, "result_preview": result_preview, "updated_at": utc_now()})

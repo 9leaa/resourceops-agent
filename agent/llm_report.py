@@ -4,9 +4,9 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
-from agent.llm_client import LlmClient
+from agent.llm_client import LlmClient, report_system_prompt
 from agent.report_context import build_report_context
 from app.schemas import DiagnosisFinding, EvidenceItem, ResourceType
 from tools.registry import ToolExecutionResult
@@ -15,10 +15,7 @@ from trace.llm_calls import build_llm_call_record
 
 REQUIRED_SECTIONS = ("问题概览", "关键证据", "诊断发现", "建议操作", "审批状态", "风险说明")
 SYSTEM_PROMPT = (
-    "你是 ResourceOps 的诊断报告撰写器。"
-    "输入数据已经由确定性工具和 Detector 生成。"
-    "你只能重组和解释输入中的事实，不能新增事实、工具结果、命令或操作。"
-    "必须准确区分：发现、建议、待审批、dry-run、真实执行。"
+    report_system_prompt()
 )
 
 
@@ -104,6 +101,7 @@ def build_llm_report_result(
     approvals: list[dict[str, Any]],
     llm_client: LlmClient | None,
     report_context: dict[str, Any] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> LlmReportResult:
     if llm_client is None:
         return LlmReportResult(
@@ -126,7 +124,12 @@ def build_llm_report_result(
     report = ""
     started = time.perf_counter()
     try:
-        report = llm_client.generate_report(prompt).strip()
+        report = generate_report_text(
+            llm_client=llm_client,
+            prompt=prompt,
+            stream_callback=stream_callback,
+        )
+        report = clean_llm_report_output(report)
         validate_llm_report(report, approvals)
         latency_ms = max(1, int((time.perf_counter() - started) * 1000))
         return LlmReportResult(
@@ -178,14 +181,15 @@ def build_report_prompt(*, report_context: dict[str, Any]) -> str:
     return f"""请根据下面的结构化诊断数据生成中文 Markdown 报告。
 
 要求：
-1. 只使用输入 JSON 中的事实。
-2. 重点解释 diagnosis.root_causes 与 key_evidence。
-3. system_summary 用于说明当前资源状态。
-4. ruled_out 只做简短排除说明，不展开无关细节。
-5. recommendations 必须保持原审批和执行状态；pending 审批必须写出 approval_id、pending 和“尚未执行”。
-6. 不生成 JSON 中不存在的命令、PID、数值或操作。
-7. 每节最多 2 条；诊断发现最多 3 条。相同 PID、数值和状态只出现一次，不在不同章节重复解释。
-8. 报告控制在 700～1100 个中文字符左右；问题概览只概括结论，关键证据写数值，其他章节不要复述数值。
+1. 直接输出最终 Markdown 报告正文，第一行必须是 `## 问题概览`，不要输出“我将/我先/下面是/根据数据”等开场说明。
+2. 只使用输入 JSON 中的事实。
+3. 重点解释 diagnosis.root_causes 与 key_evidence。
+4. system_summary 用于说明当前资源状态。
+5. ruled_out 只做简短排除说明，不展开无关细节。
+6. recommendations 必须保持原审批和执行状态；pending 审批必须写出 approval_id、pending 和“尚未执行”。
+7. 不生成 JSON 中不存在的命令、PID、数值或操作。
+8. 每节最多 2 条；诊断发现最多 3 条。相同 PID、数值和状态只出现一次，不在不同章节重复解释。
+9. 报告控制在 700～1100 个中文字符左右；问题概览只概括结论，关键证据写数值，其他章节不要复述数值。
 
 必须包含：问题概览、关键证据、诊断发现、建议操作、审批状态、风险说明。
 
@@ -194,6 +198,87 @@ def build_report_prompt(*, report_context: dict[str, Any]) -> str:
 {json.dumps(report_context, ensure_ascii=False, indent=2)}
 ```
 """
+
+
+def generate_report_text(
+    *,
+    llm_client: LlmClient,
+    prompt: str,
+    stream_callback: Callable[[str], None] | None = None,
+) -> str:
+    stream_report = getattr(llm_client, "stream_report", None)
+    if stream_callback is not None and callable(stream_report):
+        chunks: list[str] = []
+        for chunk in stream_report(prompt):
+            text = str(chunk)
+            chunks.append(text)
+            stream_callback(text)
+        return "".join(chunks).strip()
+
+    report = llm_client.generate_report(prompt).strip()
+    if stream_callback is not None and report:
+        stream_callback(report)
+    return report
+
+
+def clean_llm_report_output(report: str) -> str:
+    """Remove LLM meta prose and normalize common section heading shapes."""
+
+    text = strip_markdown_fence(report.strip())
+    start_index = report_start_index(text)
+    if start_index is not None:
+        text = text[start_index:].strip()
+    return normalize_report_headings(text)
+
+
+def stream_visible_report_text(report: str) -> str:
+    """Return only the report body that is safe to reveal during streaming."""
+
+    text = strip_opening_markdown_fence(report)
+    start_index = report_start_index(text)
+    if start_index is None:
+        return ""
+    return text[start_index:]
+
+
+def strip_markdown_fence(text: str) -> str:
+    match = re.match(r"^```(?:markdown|md)?\s*\n(?P<body>.*)\n```\s*$", text, flags=re.DOTALL)
+    if match:
+        return match.group("body").strip()
+    return text
+
+
+def strip_opening_markdown_fence(text: str) -> str:
+    return re.sub(r"^\s*```(?:markdown|md)?\s*\n", "", text, count=1)
+
+
+def report_start_index(text: str) -> int | None:
+    patterns = (
+        r"(?m)^\s*#{1,6}\s*(?:\d+[.、]\s*)?问题概览\b",
+        r"(?m)^\s*\*\*问题概览\*\*\s*$",
+        r"\*\*问题概览\*\*",
+    )
+    matches = [match.start() for pattern in patterns if (match := re.search(pattern, text))]
+    if matches:
+        return min(matches)
+    return None
+
+
+def normalize_report_headings(text: str) -> str:
+    normalized = text
+    for section in REQUIRED_SECTIONS:
+        escaped = re.escape(section)
+        normalized = re.sub(
+            rf"(?m)^\s*#{1,6}\s*(?:\d+[.、]\s*)?{escaped}\s*$",
+            f"## {section}",
+            normalized,
+        )
+        normalized = re.sub(
+            rf"(?m)^\s*\*\*{escaped}\*\*\s*$",
+            f"## {section}",
+            normalized,
+        )
+    return normalized.strip()
 
 
 def validate_llm_report(report: str, approvals: list[dict[str, Any]]) -> None:

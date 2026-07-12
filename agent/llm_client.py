@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Iterator, Protocol
 
 import httpx
 
@@ -39,17 +40,11 @@ class OpenAICompatibleLlmClient:
     def _generate_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
         """Call an OpenAI-compatible chat completion and return plain text."""
 
-        payload: dict[str, object] = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        if self.service_tier:
-            payload["service_tier"] = self.service_tier
+        payload = self._chat_payload(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+        )
 
         response = self._post_with_retry(payload)
 
@@ -87,15 +82,104 @@ class OpenAICompatibleLlmClient:
 
     def generate_report(self, prompt: str) -> str:
         return self._generate_text(
-            system_prompt=(
-                "你是 ResourceOps 的诊断报告撰写器。"
-                "输入数据已经由确定性工具和 Detector 生成。"
-                "你只能重组和解释输入中的事实，不能新增事实、工具结果、命令或操作。"
-                "必须准确区分：发现、建议、待审批、dry-run、真实执行。"
-            ),
+            system_prompt=report_system_prompt(),
             user_prompt=prompt,
             max_tokens=self.report_max_tokens,
         )
+
+    def stream_report(self, prompt: str) -> Iterator[str]:
+        """Stream report chunks from an OpenAI-compatible chat completion."""
+
+        payload = self._chat_payload(
+            system_prompt=report_system_prompt(),
+            user_prompt=prompt,
+            max_tokens=self.report_max_tokens,
+            stream=True,
+        )
+        for line in self._stream_lines_with_retry(payload):
+            if not line.startswith("data:"):
+                continue
+
+            raw_data = line.removeprefix("data:").strip()
+            if not raw_data:
+                continue
+            if raw_data == "[DONE]":
+                break
+
+            try:
+                data = json.loads(raw_data)
+                delta = data["choices"][0].get("delta") or {}
+                content = delta.get("content")
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError("invalid streamed llm response shape") from exc
+
+            if content:
+                yield str(content)
+
+    def _chat_payload(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        stream: bool = False,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if stream:
+            payload["stream"] = True
+        if self.service_tier:
+            payload["service_tier"] = self.service_tier
+        return payload
+
+    def _stream_lines_with_retry(self, payload: dict[str, object]) -> Iterator[str]:
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "authorization": f"Bearer {self.api_key}",
+            "content-type": "application/json",
+        }
+        for attempt in range(self.max_retries + 1):
+            yielded_line = False
+            try:
+                with httpx.stream(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                ) as response:
+                    if response.status_code in {429, 502, 503, 504} and attempt < self.max_retries:
+                        pass
+                    else:
+                        response.raise_for_status()
+                        for line in response.iter_lines():
+                            yielded_line = True
+                            yield line
+                        return
+            except (httpx.TimeoutException, httpx.TransportError):
+                if attempt >= self.max_retries or yielded_line:
+                    raise
+            if attempt < self.max_retries:
+                time.sleep(self.retry_backoff_seconds * (2**attempt))
+
+        raise RuntimeError("unreachable LLM streaming retry state")
+
+
+def report_system_prompt() -> str:
+    return (
+        "你是 ResourceOps 的诊断报告撰写器。"
+        "输入数据已经由确定性工具和 Detector 生成。"
+        "你只能重组和解释输入中的事实，不能新增事实、工具结果、命令或操作。"
+        "必须准确区分：发现、建议、待审批、dry-run、真实执行。"
+        "直接输出最终 Markdown 报告正文，不要输出写作计划、解释过程或开场白。"
+    )
 
 
 def build_default_llm_client_from_env() -> LlmClient | None:

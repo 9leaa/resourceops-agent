@@ -14,6 +14,24 @@ class FakeResponse:
         return {"choices": [{"message": {"content": "OK"}}]}
 
 
+class FakeStreamResponse:
+    def __init__(self, lines: list[str], status_code: int = 200) -> None:
+        self.lines = lines
+        self.status_code = status_code
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_lines(self):
+        yield from self.lines
+
+
 def test_llm_client_uses_fast_tier_and_planner_token_limit(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -119,3 +137,33 @@ def test_llm_client_retries_transient_gateway_error(monkeypatch) -> None:
 
     assert client.generate_report("report") == "OK"
     assert calls == 2
+
+
+def test_llm_client_streams_report_chunks(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_stream(*args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+        return FakeStreamResponse(
+            [
+                'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+                'data: {"choices":[{"delta":{"content":"lo"}}]}',
+                "data: [DONE]",
+            ]
+        )
+
+    monkeypatch.setattr("agent.llm_client.httpx.stream", fake_stream)
+    client = OpenAICompatibleLlmClient(
+        api_key="test-key",
+        model="test-model",
+        base_url="https://example.test/v1",
+        report_max_tokens=768,
+    )
+
+    assert "".join(client.stream_report("report")) == "Hello"
+
+    payload = captured["json"]
+    assert isinstance(payload, dict)
+    assert payload["stream"] is True
+    assert payload["max_tokens"] == 768

@@ -45,5 +45,7 @@ def sync_approval_trace(
                 trace_store.update_run_status(approval.run_id, RunStatus.FAILED)
             else:
                 trace_store.update_run_status(approval.run_id, RunStatus.COMPLETED)
+
+        trace_store.reconcile_run_report(approval.run_id)
     except KeyError:
         return

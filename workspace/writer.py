@@ -7,7 +7,8 @@ import tarfile
 from pathlib import Path
 from typing import Any
 
-from app.schemas import ResourceAgentResult
+from agent.report_reconcile import reconcile_report_text_with_trace
+from app.schemas import DiagnosisSnapshot, ReportSnapshot, ResourceAgentResult
 from trace.llm_calls import extract_llm_calls, public_llm_call
 from trace.summary import build_run_summary, render_run_summary_markdown
 
@@ -69,12 +70,66 @@ class WorkspaceWriter:
 
         return run_dir
 
+    def write_diagnosis_snapshot(self, snapshot: DiagnosisSnapshot) -> Path:
+        run_dir = self.run_dir(snapshot.run.run_id)
+
+        (run_dir / "raw").mkdir(parents=True, exist_ok=True)
+        (run_dir / "compact").mkdir(parents=True, exist_ok=True)
+        (run_dir / "summary").mkdir(parents=True, exist_ok=True)
+        (run_dir / "trace").mkdir(parents=True, exist_ok=True)
+
+        self._write_json(run_dir / "metadata.json", self._metadata_from_snapshot(snapshot))
+        self._write_json(run_dir / "plan.json", self._tool_plan_from_snapshot(snapshot))
+        self._write_json(run_dir / "todos.json", [self._jsonable(todo) for todo in snapshot.todos])
+        self._write_text(run_dir / "report.md", "Report is still generating.")
+        self._write_jsonl(
+            run_dir / "raw" / "tool_outputs.jsonl",
+            [self._jsonable(tool_result) for tool_result in snapshot.tool_results],
+        )
+        self._write_json(
+            run_dir / "compact" / "report_context.json",
+            {"available": False, "reason": "report has not been generated yet", "report_mode": snapshot.run.report_mode},
+        )
+        compact_steps = self._compact_steps([self._jsonable(step) for step in snapshot.steps])
+        self._write_json(run_dir / "trace" / "steps.json", compact_steps)
+        self._write_json(run_dir / "trace" / "evidence.json", [self._jsonable(item) for item in snapshot.evidence_items])
+        self._write_json(run_dir / "trace" / "findings.json", [self._jsonable(item) for item in snapshot.findings])
+        self._write_json(run_dir / "trace" / "approvals.json", [self._jsonable(item) for item in snapshot.approvals])
+        self._write_json(run_dir / "trace" / "action_results.json", [])
+        self._write_llm_call_files(run_dir, [self._jsonable(step) for step in snapshot.steps])
+        self._write_summary_files(run_dir, build_run_summary(self._trace_from_snapshot(snapshot)))
+        return run_dir
+
+    def apply_report_snapshot(self, report: ReportSnapshot, trace_store: Any | None = None) -> Path:
+        run_dir = self.run_dir(report.run_id)
+        if not run_dir.exists() or not run_dir.is_dir():
+            raise FileNotFoundError(f"workspace not found: {run_dir}")
+
+        self._write_text(run_dir / "report.md", report.final_report)
+
+        if trace_store is not None:
+            trace = trace_store.get_trace(report.run_id)
+            self._write_json(run_dir / "metadata.json", self._metadata_from_trace(trace, run_dir))
+            self._write_json(run_dir / "todos.json", trace.get("todos") or [])
+            self._write_json(run_dir / "trace" / "steps.json", self._compact_steps(trace.get("steps") or []))
+            self._write_json(run_dir / "trace" / "approvals.json", trace.get("approvals") or [])
+            self._write_json(run_dir / "trace" / "action_results.json", trace.get("action_results") or [])
+            self._write_llm_call_files(run_dir, trace.get("steps") or [])
+            self._write_summary_files(run_dir, build_run_summary(trace))
+            self._write_remediation_summary(run_dir, trace)
+        else:
+            existing_steps = read_json_file(run_dir / "trace" / "steps.json") if (run_dir / "trace" / "steps.json").exists() else []
+            self._write_json(run_dir / "trace" / "steps.json", existing_steps + self._compact_steps([self._jsonable(step) for step in report.steps]))
+            self._write_llm_call_files(run_dir, [self._jsonable(step) for step in report.steps])
+        return run_dir
+
     def update_from_trace(self, run_id: str, trace_store: Any) -> Path:
         run_dir = self.run_dir(run_id)
         if not run_dir.exists() or not run_dir.is_dir():
             raise FileNotFoundError(f"workspace not found: {run_dir}")
 
         trace = trace_store.get_trace(run_id)
+        self._write_reconciled_report_from_trace(run_dir, trace)
         self._write_json(run_dir / "metadata.json", self._metadata_from_trace(trace, run_dir))
         self._write_json(run_dir / "todos.json", trace.get("todos") or [])
         self._write_json(run_dir / "trace" / "approvals.json", trace.get("approvals") or [])
@@ -84,6 +139,16 @@ class WorkspaceWriter:
         self._write_summary_files(run_dir, build_run_summary(trace))
         self._write_remediation_summary(run_dir, trace)
         return run_dir
+
+    def _write_reconciled_report_from_trace(self, run_dir: Path, trace: dict[str, Any]) -> None:
+        final_report = (trace.get("run") or {}).get("final_report")
+        if not final_report:
+            return
+
+        self._write_text(
+            run_dir / "report.md",
+            reconcile_report_text_with_trace(str(final_report), trace),
+        )
 
     def create_bundle(
         self,
@@ -132,6 +197,37 @@ class WorkspaceWriter:
         )
         return metadata
 
+    def _metadata_from_snapshot(self, snapshot: DiagnosisSnapshot) -> dict[str, Any]:
+        metadata = snapshot.run.model_dump(mode="json")
+        metadata.pop("final_report", None)
+        metadata.update(
+            {
+                "workspace_version": WORKSPACE_VERSION,
+                "requires_approval": snapshot.requires_approval,
+                "report_status": "generating",
+                "compact": {
+                    "report_context": False,
+                    "llm_calls_summary": True,
+                },
+                "report": {
+                    "path": "report.md",
+                    "generated_at": None,
+                    "snapshot_stage": "diagnosis_pending_report",
+                    "sha256": None,
+                },
+                "counts": {
+                    "steps": len(snapshot.steps),
+                    "tool_results": len(snapshot.tool_results),
+                    "evidence_items": len(snapshot.evidence_items),
+                    "findings": len(snapshot.findings),
+                    "approvals": len(snapshot.approvals),
+                    "todos": len(snapshot.todos),
+                    "action_results": 0,
+                },
+            }
+        )
+        return metadata
+
     def _metadata_from_trace(self, trace: dict[str, Any], run_dir: Path) -> dict[str, Any]:
         run = dict(trace["run"])
         final_report = run.pop("final_report", None)
@@ -171,6 +267,11 @@ class WorkspaceWriter:
         if result.tool_plan is None:
             return {"available": False, "reason": "tool_plan is not available"}
         return result.tool_plan.model_dump(mode="json")
+
+    def _tool_plan_from_snapshot(self, snapshot: DiagnosisSnapshot) -> dict[str, Any]:
+        if snapshot.tool_plan is None:
+            return {"available": False, "reason": "tool_plan is not available"}
+        return snapshot.tool_plan.model_dump(mode="json")
 
     def _has_report_context(self, result: ResourceAgentResult) -> bool:
         return self._find_report_context(result) is not None
@@ -250,6 +351,26 @@ class WorkspaceWriter:
             "findings": [self._jsonable(item) for item in result.findings],
             "approvals": [self._jsonable(item) for item in result.approvals],
             "todos": [self._jsonable(item) for item in result.todos],
+            "action_results": [],
+        }
+
+    def _trace_from_snapshot(self, snapshot: DiagnosisSnapshot) -> dict[str, Any]:
+        tool_calls = []
+        tool_steps = {
+            step.action: step for step in snapshot.steps if step.action and step.action not in {"llm_planner", "llm_report"}
+        }
+        for tool_result in snapshot.tool_results:
+            payload = self._jsonable(tool_result)
+            payload["step_id"] = getattr(tool_steps.get(tool_result.tool_name), "step_id", None)
+            tool_calls.append(payload)
+        return {
+            "run": self._jsonable(snapshot.run),
+            "steps": [self._jsonable(step) for step in snapshot.steps],
+            "tool_calls": tool_calls,
+            "evidence_items": [self._jsonable(item) for item in snapshot.evidence_items],
+            "findings": [self._jsonable(item) for item in snapshot.findings],
+            "approvals": [self._jsonable(item) for item in snapshot.approvals],
+            "todos": [self._jsonable(item) for item in snapshot.todos],
             "action_results": [],
         }
 

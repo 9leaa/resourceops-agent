@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import sys
+import time
 from pathlib import Path
+from threading import Lock
 from typing import Any, Sequence
 
 from rich.console import Console, Group
@@ -13,6 +16,8 @@ from rich.table import Table
 from rich.text import Text
 
 from agent.resource_agent import ResourceAgent
+from agent.llm_report import stream_visible_report_text
+from agent.report_reconcile import reconcile_report_snapshot_with_trace
 from approval.service import ApprovalService
 from approval.store import ApprovalStore
 from approval.trace_sync import sync_approval_trace
@@ -159,6 +164,13 @@ def handle_diagnose(args: argparse.Namespace) -> int:
             report_mode=args.report_mode,
             event_sink=event_sink,
         )
+        if args.interactive_approval and not args.json:
+            return handle_interactive_decoupled_diagnose(
+                agent=agent,
+                incident=incident,
+                trace_store=trace_store,
+                event_sink=event_sink,
+            )
         result = agent.diagnose(incident)
     except Exception:
         if event_sink is not None:
@@ -188,6 +200,57 @@ def handle_diagnose(args: argparse.Namespace) -> int:
             finally:
                 if event_sink is not None:
                     event_sink.close()
+    return 0
+
+
+def handle_interactive_decoupled_diagnose(
+    *,
+    agent: ResourceAgent,
+    incident: ResourceIncident,
+    trace_store: TraceStore,
+    event_sink: "RichTodoEventSink | None",
+) -> int:
+    snapshot = agent.collect_and_detect(incident)
+    trace_store.save_diagnosis_snapshot(snapshot)
+    WorkspaceWriter().write_diagnosis_snapshot(snapshot)
+
+    approval_store = ApprovalStore()
+    if event_sink is not None:
+        refresh_todo_sink_from_trace(event_sink, snapshot.run.run_id, trace_store)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        report_stream = ReportStreamBuffer()
+        report_future = executor.submit(
+            agent.generate_report,
+            snapshot,
+            emit_events=False,
+            stream_callback=report_stream.append,
+        )
+        try:
+            run_interactive_approvals(
+                snapshot.run.run_id,
+                snapshot.approvals,
+                trace_store=trace_store,
+                approval_store=approval_store,
+                event_sink=event_sink,
+            )
+            report = wait_report_after_approval(
+                report_future=report_future,
+                run_id=snapshot.run.run_id,
+                trace_store=trace_store,
+                event_sink=event_sink,
+            )
+            trace_store.save_report_snapshot(report)
+            WorkspaceWriter().apply_report_snapshot(report, trace_store=trace_store)
+            if event_sink is not None:
+                refresh_todo_sink_from_trace(event_sink, snapshot.run.run_id, trace_store)
+                event_sink.close()
+                event_sink = None
+            print_diagnosis_report(report.final_report, snapshot.run.run_id)
+        finally:
+            if event_sink is not None:
+                event_sink.close()
+
     return 0
 
 def handle_execute_real(args: argparse.Namespace) -> int:
@@ -304,7 +367,7 @@ def run_interactive_approvals(
                     print_interactive_lines(event_sink, f"已拒绝审批：{rejected.approval_id}")
                 break
 
-            if choice in {"s", "skip", ""}:
+            if choice in {"s", "skip"}:
                 refresh_todo_sink_from_trace(event_sink, run_id, trace_store)
                 decisions.append(("skipped", approval_id))
                 print_interactive_lines(event_sink, f"已跳过审批，保持 pending：{approval_id}")
@@ -410,6 +473,56 @@ def print_diagnosis_report(
         resume_event_sink(event_sink)
 
 
+class ReportStreamBuffer:
+    """Thread-safe buffer for report chunks generated during approval input."""
+
+    def __init__(self) -> None:
+        self._chunks: list[str] = []
+        self._lock = Lock()
+
+    def append(self, chunk: str) -> None:
+        if not chunk:
+            return
+        with self._lock:
+            self._chunks.append(chunk)
+
+    def raw_text(self) -> str:
+        with self._lock:
+            return "".join(self._chunks)
+
+    def visible_text(self) -> str:
+        return stream_visible_report_text(self.raw_text())
+
+
+def wait_report_after_approval(
+    *,
+    report_future: Future[Any],
+    run_id: str,
+    trace_store: TraceStore,
+    event_sink: "RichTodoEventSink | None" = None,
+) -> Any:
+    """Wait for the background report and reconcile it with final approval state.
+
+    In interactive mode the Live panel must not be closed before this point:
+    closing it earlier freezes a stale "Report running" snapshot in the terminal.
+    The report body is already streamed into ReportStreamBuffer while the user
+    is approving actions; after approval we wait for completion, reconcile
+    dynamic approval/action sections from trace, then the caller persists and
+    prints it.
+    """
+
+    announced_wait = False
+    while not report_future.done():
+        if not announced_wait:
+            print_interactive_lines(event_sink, "\n正在等待 LLM report 生成...")
+            announced_wait = True
+        time.sleep(0.1)
+
+    report = report_future.result()
+    trace = trace_store.get_trace(run_id)
+    return reconcile_report_snapshot_with_trace(report, trace)
+
+
 def print_pending_approval_list(
     run_id: str,
     pending: list[dict[str, Any]],
@@ -459,13 +572,12 @@ def ask_approval_choice(
                 "reject",
                 "s",
                 "skip",
-                "",
                 "q",
                 "quit",
                 "exit",
             }:
                 return choice
-            print("输入无效，请输入 y / r / n / s / q。")
+            print("请输入明确选择：y / r / n / s / q。")
     finally:
         resume_event_sink(event_sink)
 
@@ -824,6 +936,7 @@ class RichTodoEventSink:
         tasks = [todo for todo in self.todos if normalize_value(todo.level) == "task"]
         groups = [
             ("tools", "Tool execution", True),
+            ("report", "Report", True),
             ("approval", "Approval", False),
             ("actions", "Action execution", True),
         ]
@@ -894,6 +1007,8 @@ def status_icon(status: object) -> str:
         return "[red]×[/]"
     if status == "waiting_approval":
         return "[yellow]![/]"
+    if status == "approval_detected":
+        return "[yellow]![/]"
     if status == "skipped":
         return "[dim]-[/]"
     return "[dim]○[/]"
@@ -909,6 +1024,8 @@ def status_style(status: object) -> str:
         return "red"
     if status == "waiting_approval":
         return "yellow"
+    if status == "approval_detected":
+        return "yellow"
     return "dim"
 
 
@@ -920,6 +1037,8 @@ def phase_title_style(status: object) -> str:
     if status == "failed":
         return "bold red"
     if status == "waiting_approval":
+        return "bold yellow"
+    if status == "approval_detected":
         return "bold yellow"
     if status == "skipped":
         return "dim"
@@ -936,6 +1055,8 @@ def task_title_style(status: object) -> str:
         return "red"
     if status == "waiting_approval":
         return "yellow"
+    if status == "approval_detected":
+        return "yellow"
     return "dim blue"
 
 
@@ -948,6 +1069,8 @@ def group_title_style(group: str, status: object) -> str:
     if status == "failed":
         return "bold red"
     if status == "waiting_approval":
+        return "bold yellow"
+    if status == "approval_detected":
         return "bold yellow"
     if group == "actions":
         return "dim blue"
@@ -1007,6 +1130,8 @@ def plain_todo_status_icon(status: str | None) -> str:
     if status == "failed":
         return "[×]"
     if status == "waiting_approval":
+        return "[!]"
+    if status == "approval_detected":
         return "[!]"
     if status == "skipped":
         return "[-]"
