@@ -459,16 +459,25 @@ class TraceStore:
                 ),
             )
 
-    def save_approval(self, approval: Approval) -> None:
+    def save_approval(self, approval: Approval) -> Approval:
         payload = approval.model_dump(mode="json")
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT OR REPLACE INTO approvals (
+                INSERT INTO approvals (
                     approval_id, run_id, action, args_json, reason, risk,
                     status, created_at, decided_at, executed_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(approval_id) DO UPDATE SET
+                    action = excluded.action,
+                    args_json = excluded.args_json,
+                    reason = excluded.reason,
+                    risk = excluded.risk,
+                    status = excluded.status,
+                    decided_at = excluded.decided_at,
+                    executed_at = excluded.executed_at
+                WHERE approvals.status IN ('pending', 'approved')
                 """,
                 (
                     payload["approval_id"],
@@ -483,6 +492,72 @@ class TraceStore:
                     payload["executed_at"],
                 ),
             )
+        return self.get_approval(approval.approval_id)
+
+    def get_approval(self, approval_id: str) -> Approval:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"approval not found: {approval_id}")
+        return Approval.model_validate(self._approval_to_dict(row))
+
+    def list_approvals(
+        self,
+        status: str | ApprovalStatus | None = ApprovalStatus.PENDING,
+        run_id: str | None = None,
+    ) -> list[Approval]:
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(schema_value(status))
+
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM approvals {where} ORDER BY created_at",
+                params,
+            ).fetchall()
+        return [Approval.model_validate(self._approval_to_dict(row)) for row in rows]
+
+    def update_approval_status(
+        self,
+        approval_id: str,
+        status: ApprovalStatus,
+        *,
+        decided_at: Any | None = None,
+        executed_at: Any | None = None,
+    ) -> Approval:
+        decided_at_value = decided_at.isoformat() if hasattr(decided_at, "isoformat") else decided_at
+        executed_at_value = executed_at.isoformat() if hasattr(executed_at, "isoformat") else executed_at
+
+        with self.connect() as connection:
+            current = connection.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"approval not found: {approval_id}")
+
+            connection.execute(
+                """
+                UPDATE approvals
+                SET status = ?,
+                    decided_at = COALESCE(?, decided_at),
+                    executed_at = COALESCE(?, executed_at)
+                WHERE approval_id = ?
+                """,
+                (status.value, decided_at_value, executed_at_value, approval_id),
+            )
+        return self.get_approval(approval_id)
 
     def save_todo(self, todo: DiagnosisTodo) -> None:
         payload = todo.model_dump(mode="json")

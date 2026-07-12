@@ -70,10 +70,12 @@ class ApprovalService:
         approval = self.store.get(approval_id)
         self._require_pending(approval)
 
-        # 先保存 approved，让 ActionExecutor 能明确拿到“已批准”的审批对象。
-        approval.status = ApprovalStatus.APPROVED
-        approval.decided_at = utc_now()
-        approval = self.store.save(approval)
+        # 先进入 approved，让 ActionExecutor 能明确拿到“已批准”的审批对象。
+        approval = self.store.update_status(
+            approval_id,
+            ApprovalStatus.APPROVED,
+            decided_at=utc_now(),
+        )
 
         action_result = self.action_executor.execute(
             approval.action,
@@ -84,9 +86,11 @@ class ApprovalService:
 
         if action_result.status == ActionStatus.SUCCESS:
             # P12 的 executed 代表 dry-run 执行完成；真实执行仍留给 P13。
-            approval.status = ApprovalStatus.EXECUTED
-            approval.executed_at = utc_now()
-            approval = self.store.save(approval)
+            approval = self.store.update_status(
+                approval_id,
+                ApprovalStatus.EXECUTED,
+                executed_at=utc_now(),
+            )
 
         tool_result = self._tool_result_from_action_result(approval, action_result)
         return approval, tool_result, action_result
@@ -110,8 +114,11 @@ class ApprovalService:
         )
 
         if action_result.status == ActionStatus.SUCCESS:
-            approval.executed_at = utc_now()
-            approval = self.store.save(approval)
+            approval = self.store.update_status(
+                approval_id,
+                ApprovalStatus.EXECUTED,
+                executed_at=utc_now(),
+            )
 
         tool_result = self._tool_result_from_action_result(approval, action_result)
         return approval, tool_result, action_result
@@ -161,9 +168,11 @@ class ApprovalService:
     def reject(self, approval_id: str) -> Approval:
         approval = self.store.get(approval_id)
         self._require_pending(approval)
-        approval.status = ApprovalStatus.REJECTED
-        approval.decided_at = utc_now()
-        return self.store.save(approval)
+        return self.store.update_status(
+            approval_id,
+            ApprovalStatus.REJECTED,
+            decided_at=utc_now(),
+        )
 
     @staticmethod
     def _require_pending(approval: Approval) -> None:

@@ -1,54 +1,66 @@
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
-from app.schemas import Approval
-
-
-DEFAULT_APPROVAL_STORE = Path(__file__).resolve().parents[1] / "var" / "approvals.jsonl"
+from app.schemas import Approval, ApprovalStatus
+from trace.store import TraceStore, resolve_trace_db
 
 
 def resolve_approval_store(path: Path | str | None = None) -> Path:
-    if path is not None:
-        return Path(path)
-    return Path(os.getenv("RESOURCEOPS_APPROVAL_STORE", DEFAULT_APPROVAL_STORE))
+    """Return the SQLite database used for approvals.
+
+    Approval state now lives in the same SQLite database as trace state. The
+    function name is kept for older callers, but RESOURCEOPS_APPROVAL_STORE is
+    intentionally ignored.
+    """
+
+    return resolve_trace_db(path)
 
 
 class ApprovalStore:
-    """负责审批数据怎么存怎么取"""
-    def __init__(self, path: Path | str | None = None) -> None:
-        """确定存储路径、确保父目录存在、确保文件存在"""
-        self.path = resolve_approval_store(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.touch(exist_ok=True)
+    """SQLite-backed approval store.
+
+    The public methods intentionally match the old JSONL store so CLI, API and
+    tests can move to SQLite without changing every call site at once.
+    """
+
+    def __init__(
+        self,
+        path: Path | str | None = None,
+        *,
+        trace_store: TraceStore | None = None,
+    ) -> None:
+        self.trace_store = trace_store or TraceStore(resolve_approval_store(path))
+        self.path = self.trace_store.path
+
+    def create(self, approval: Approval) -> Approval:
+        return self.save(approval)
 
     def save(self, approval: Approval) -> Approval:
-        """保存或更新一个审批"""
-        approvals = {item.approval_id: item for item in self.list(status=None)}
-        approvals[approval.approval_id] = approval
-        with self.path.open("w", encoding="utf-8") as file:
-            for item in approvals.values():
-                file.write(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n")
-        return approval
+        return self.trace_store.save_approval(approval)
 
     def get(self, approval_id: str) -> Approval:
-        """根据id读取审批"""
-        for approval in self.list(status=None):
-            if approval.approval_id == approval_id:
-                return approval
-        raise KeyError(f"approval not found: {approval_id}")
+        return self.trace_store.get_approval(approval_id)
 
-    def list(self, status: str | None = "pending") -> list[Approval]:
-        """列出审批表，默认返回是pending，如果是status = None：则返回所有审批"""
-        approvals: list[Approval] = []
-        with self.path.open("r", encoding="utf-8") as file:
-            for line in file:
-                line = line.strip()
-                if not line:
-                    continue
-                approval = Approval.model_validate(json.loads(line))
-                if status is None or approval.status == status:
-                    approvals.append(approval)
-        return approvals
+    def list(
+        self,
+        status: str | ApprovalStatus | None = "pending",
+        *,
+        run_id: str | None = None,
+    ) -> list[Approval]:
+        return self.trace_store.list_approvals(status=status, run_id=run_id)
+
+    def update_status(
+        self,
+        approval_id: str,
+        status: str | ApprovalStatus,
+        *,
+        decided_at=None,
+        executed_at=None,
+    ) -> Approval:
+        return self.trace_store.update_approval_status(
+            approval_id,
+            ApprovalStatus(status),
+            decided_at=decided_at,
+            executed_at=executed_at,
+        )
