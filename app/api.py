@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, status
@@ -25,6 +26,7 @@ from trace.store import TraceStore
 from workspace.writer import WorkspaceWriter
 
 app = FastAPI(title="ResourceOps Agent", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
@@ -120,7 +122,13 @@ def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
 
     trace_store.save_diagnosis_snapshot(snapshot)
     workspace_writer = WorkspaceWriter()
-    workspace_writer.write_diagnosis_snapshot(snapshot)
+    try:
+        workspace_writer.write_diagnosis_snapshot(snapshot)
+    except OSError as exc:
+        logger.warning(
+            "workspace diagnosis snapshot write failed",
+            extra={"run_id": snapshot.run.run_id, "error": str(exc)},
+        )
     submit_report_job(
         agent=agent,
         snapshot=snapshot,
