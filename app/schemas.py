@@ -184,6 +184,16 @@ class ReportMode(str, Enum):
     TEMPLATE = "template"
     LLM = "llm"
 
+
+class ReportGenerationStatus(str, Enum):
+    """报告生成状态。"""
+
+    NOT_STARTED = "not_started"
+    GENERATING = "generating"
+    READY = "ready"
+    FALLBACK = "fallback"
+    FAILED = "failed"
+
 class EvidenceCategory(str, Enum):
     """证据分类，用于报告和 trace 展示时过滤/分组。"""
 
@@ -286,6 +296,10 @@ class DiagnosisRun(StrictBaseModel):
     agent_mode: str = "deterministic"
     planner_mode: AgentPlannerMode = AgentPlannerMode.DETERMINISTIC
     report_mode: ReportMode = ReportMode.TEMPLATE
+    report_status: ReportGenerationStatus = ReportGenerationStatus.NOT_STARTED
+    report_error: str | None = None
+    report_started_at: datetime | None = None
+    report_finished_at: datetime | None = None
     final_report: str | None = None
     root_cause: str | None = None
     summary: str | None = None

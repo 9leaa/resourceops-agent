@@ -16,6 +16,7 @@ from app.schemas import (
     DiagnosisStep,
     DiagnosisTodo,
     EvidenceItem,
+    ReportGenerationStatus,
     RunStatus,
     TodoDisplayGroup,
     TodoLevel,
@@ -111,6 +112,10 @@ class TraceStore:
                     agent_mode TEXT NOT NULL,
                     planner_mode TEXT NOT NULL DEFAULT 'deterministic',
                     report_mode TEXT NOT NULL DEFAULT 'template',
+                    report_status TEXT NOT NULL DEFAULT 'not_started',
+                    report_error TEXT,
+                    report_started_at TEXT,
+                    report_finished_at TEXT,
                     final_report TEXT,
                     root_cause TEXT,
                     summary TEXT,
@@ -249,6 +254,30 @@ class TraceStore:
                 "diagnosis_runs",
                 "report_mode",
                 "TEXT NOT NULL DEFAULT 'template'",
+            )
+            self._ensure_column(
+                connection,
+                "diagnosis_runs",
+                "report_status",
+                "TEXT NOT NULL DEFAULT 'not_started'",
+            )
+            self._ensure_column(
+                connection,
+                "diagnosis_runs",
+                "report_error",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "diagnosis_runs",
+                "report_started_at",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "diagnosis_runs",
+                "report_finished_at",
+                "TEXT",
             )
             self._ensure_column(
                 connection,
@@ -411,10 +440,12 @@ class TraceStore:
                 """
                 INSERT OR REPLACE INTO diagnosis_runs (
                     run_id, incident_id, status, user_input, resource_type, agent_mode, planner_mode, report_mode,
-                    final_report, root_cause, summary, started_at, ended_at, error      
+                    report_status, report_error, report_started_at, report_finished_at,
+                    final_report, root_cause, summary, started_at, ended_at, error
                 )
                 VALUES (
                     :run_id, :incident_id, :status, :user_input, :resource_type, :agent_mode, :planner_mode, :report_mode,
+                    :report_status, :report_error, :report_started_at, :report_finished_at,
                     :final_report, :root_cause, :summary, :started_at, :ended_at, :error
                 )
                 """,
@@ -725,7 +756,7 @@ class TraceStore:
             rows = connection.execute(
                 """
                 SELECT run_id, incident_id, status, user_input, resource_type,
-                       summary, started_at, ended_at
+                       report_status, summary, started_at, ended_at
                 FROM diagnosis_runs
                 ORDER BY started_at DESC
                 LIMIT ?
@@ -785,6 +816,56 @@ class TraceStore:
                 (final_report, next_status, ended_at, run_id),
             )
         self._with_connection(connection, write)
+
+    def update_report_status(
+        self,
+        run_id: str,
+        status: ReportGenerationStatus,
+        *,
+        error: str | None = None,
+        started_at: Any | None = None,
+        finished_at: Any | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        started_at_value = started_at.isoformat() if hasattr(started_at, "isoformat") else started_at
+        finished_at_value = finished_at.isoformat() if hasattr(finished_at, "isoformat") else finished_at
+
+        def write(active: sqlite3.Connection) -> None:
+            cursor = active.execute(
+                """
+                UPDATE diagnosis_runs
+                SET report_status = ?,
+                    report_error = ?,
+                    report_started_at = COALESCE(?, report_started_at),
+                    report_finished_at = COALESCE(?, report_finished_at)
+                WHERE run_id = ?
+                """,
+                (status.value, error, started_at_value, finished_at_value, run_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"run not found: {run_id}")
+
+        self._with_connection(connection, write)
+
+    def fail_generating_reports(self, error: str) -> int:
+        finished_at = utc_now().isoformat()
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE diagnosis_runs
+                SET report_status = ?,
+                    report_error = ?,
+                    report_finished_at = ?
+                WHERE report_status = ?
+                """,
+                (
+                    ReportGenerationStatus.FAILED.value,
+                    error,
+                    finished_at,
+                    ReportGenerationStatus.GENERATING.value,
+                ),
+            )
+            return int(cursor.rowcount)
 
     def reconcile_run_report(
         self,

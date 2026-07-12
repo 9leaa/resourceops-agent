@@ -2,19 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import Field
 
 from agent.resource_agent import ResourceAgent
+from app.report_jobs import recover_interrupted_report_jobs, submit_report_job
 from approval.service import ApprovalService
 from approval.store import ApprovalStore
 from approval.trace_sync import sync_approval_trace
-from app.schemas import IncidentSource, ResourceIncident, ResourceType, Severity, StrictBaseModel
+from app.schemas import (
+    IncidentSource,
+    ReportGenerationStatus,
+    ResourceIncident,
+    ResourceType,
+    Severity,
+    StrictBaseModel,
+    utc_now,
+)
 from trace.store import TraceStore
 
 from workspace.writer import WorkspaceWriter
 
 app = FastAPI(title="ResourceOps Agent", version="0.1.0")
+
+
+@app.on_event("startup")
+def recover_report_jobs_on_startup() -> None:
+    recover_interrupted_report_jobs(build_trace_store())
 
 
 class DiagnoseRequest(StrictBaseModel):
@@ -79,7 +93,7 @@ def build_resource_agent(
         report_mode=report_mode,
     )
 #提交诊断请求，
-@app.post("/diagnose")
+@app.post("/diagnose", status_code=status.HTTP_202_ACCEPTED)
 def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
     #保存agent的运行结果和过程记录
     trace_store = build_trace_store()
@@ -93,15 +107,38 @@ def diagnose(request: DiagnoseRequest) -> dict[str, Any]:
         source=IncidentSource.API,
         host=request.host,
     )
-    result = build_resource_agent(
+    agent = build_resource_agent(
         approval_service=approval_service,
         agent_mode=request.agent_mode,
         planner_mode=request.planner_mode,
         report_mode=request.report_mode,
-    ).diagnose(incident)
-    trace_store.save_agent_result(result)
-    write_workspace_result(result)
-    return result.model_dump(mode="json")
+    )
+    snapshot = agent.collect_and_detect(incident)
+    snapshot.run.report_status = ReportGenerationStatus.GENERATING
+    snapshot.run.report_started_at = utc_now()
+
+    trace_store.save_diagnosis_snapshot(snapshot)
+    workspace_writer = WorkspaceWriter()
+    workspace_writer.write_diagnosis_snapshot(snapshot)
+    submit_report_job(
+        agent=agent,
+        snapshot=snapshot,
+        trace_store=trace_store,
+        workspace_writer=workspace_writer,
+    )
+    return build_async_diagnose_response(snapshot)
+
+
+def build_async_diagnose_response(snapshot) -> dict[str, Any]:
+    return {
+        "run_id": snapshot.run.run_id,
+        "run_status": snapshot.run.status,
+        "report_status": snapshot.run.report_status,
+        "resource_type": snapshot.run.resource_type,
+        "requires_approval": snapshot.requires_approval,
+        "findings": [finding.model_dump(mode="json") for finding in snapshot.findings],
+        "approvals": snapshot.approvals,
+    }
 
 #返回最近agent的运行记录
 @app.get("/runs")
@@ -115,6 +152,41 @@ def get_run_trace(run_id: str) -> dict[str, Any]:
         return build_trace_store().get_trace(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/runs/{run_id}/report")
+def get_run_report(run_id: str) -> dict[str, Any]:
+    try:
+        trace = build_trace_store().get_trace(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    run = trace["run"]
+    report_status = run.get("report_status")
+    report = run.get("final_report")
+    return {
+        "run_id": run_id,
+        "report_status": report_status,
+        "source": report_source_from_steps(trace.get("steps") or []),
+        "latency_ms": report_latency_from_steps(trace.get("steps") or []),
+        "report": report if report_status in {"ready", "fallback", "failed"} else None,
+    }
+
+
+def report_source_from_steps(steps: list[dict[str, Any]]) -> str | None:
+    for step in reversed(steps):
+        if step.get("action") != "llm_report":
+            continue
+        observation = step.get("observation") or {}
+        return observation.get("source")
+    return None
+
+
+def report_latency_from_steps(steps: list[dict[str, Any]]) -> int | None:
+    for step in reversed(steps):
+        if step.get("action") == "llm_report":
+            return step.get("latency_ms")
+    return None
 
 #查看审批表，默认只查看pending的
 @app.get("/approvals")

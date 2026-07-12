@@ -24,6 +24,7 @@ from app.schemas import (
     Recommendation,
     ReportSnapshot,
     ReportMode,
+    ReportGenerationStatus,
     ResourceAgentResult,
     ResourceIncident,
     ResourceType,
@@ -468,6 +469,9 @@ class ResourceAgent:
         run = snapshot.run.model_copy(
             update={
                 "status": report.run_status,
+                "report_status": report_generation_status(report),
+                "report_error": None if report.status in {"success", "fallback"} else report.status,
+                "report_finished_at": utc_now(),
                 "final_report": report.final_report,
                 "ended_at": utc_now(),
             }
@@ -531,6 +535,14 @@ def summarize_root_cause(findings: list[DiagnosisFinding]) -> str:
     if not findings:
         return "no detector findings matched current thresholds"
     return "; ".join(finding.finding_type for finding in findings[:3])
+
+
+def report_generation_status(report: ReportSnapshot) -> ReportGenerationStatus:
+    if report.status == "fallback":
+        return ReportGenerationStatus.FALLBACK
+    if report.status == "success":
+        return ReportGenerationStatus.READY
+    return ReportGenerationStatus.FAILED
 
 def count_phrase(count: int, noun: str) -> str:
     suffix = "" if count == 1 else "s"

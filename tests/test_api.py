@@ -23,10 +23,11 @@ def test_diagnose_endpoint(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RESOURCEOPS_APPROVAL_STORE", str(tmp_path / "approvals.jsonl"))
     client = TestClient(app)
     response = client.post("/diagnose", json={"description": "为什么内存快满了？", "resource_type": "memory"})
-    assert response.status_code == 200
+    assert response.status_code == 202
     payload = response.json()
-    assert payload["run"]["resource_type"] == "memory"
-    assert payload["run"]["status"] in {"completed", "waiting_approval"}
+    assert payload["resource_type"] == "memory"
+    assert payload["run_status"] in {"running", "waiting_approval"}
+    assert payload["report_status"] == "generating"
 
 
 def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
@@ -57,12 +58,12 @@ def test_full_http_approval_flow(monkeypatch, tmp_path) -> None:
         "/diagnose",
         json={"description": "为什么内存快满了？", "resource_type": "memory"},
     )
-    assert diagnose_response.status_code == 200
+    assert diagnose_response.status_code == 202
     diagnosis = diagnose_response.json()
-    run_id = diagnosis["run"]["run_id"]
+    run_id = diagnosis["run_id"]
     approval_id = diagnosis["approvals"][0]["approval_id"]
 
-    assert diagnosis["run"]["status"] == "waiting_approval"
+    assert diagnosis["run_status"] == "waiting_approval"
     assert diagnosis["requires_approval"] is True
 
     runs_response = client.get("/runs")
